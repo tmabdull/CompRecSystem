@@ -1,0 +1,6 @@
+,address,city,province,std_unit_number,std_street_number,std_street_name,std_city,std_province,std_postal_code,std_full_address
+0,463 Conservatory Dr,Kingston,Ontario,,463 Conservatory,Dr,Kingston,ON,K7M 9C8,"463 Conservatory, Dr, Kingston, ON, K7M 9C8"
+1,463 Conservatory Drive ,Kingston ,Ontario,,463 Conservatory,Drive,Kingston,ON,K7M 9C8,"463 Conservatory, Drive, Kingston, ON, K7M 9C8"
+2,311 Janette St,Kingston,Ontario,,311 Janette,St,Kingston,ON,K7P 0K8,"311 Janette, St, Kingston, ON, K7P 0K8"
+3,311 Janette Street ,Kingston ,Ontario,,311 Janette,Street,Kingston,ON,K7P 0K8,"311 Janette, Street, Kingston, ON, K7P 0K8"
+4,4056 Bath Rd,Kingston,Ontario,,4056 Bath,Rd,Kingston,ON,K7M 4Y4,"4056 Bath, Rd, Kingston, ON, K7M 4Y4"

@@ -3,7 +3,7 @@ import pandas as pd
 from collections import defaultdict
 
 # Load the provided JSON data from the attachment
-json_file_path = "appraisals_dataset.json"
+json_file_path = "../data/raw/appraisals_dataset.json"
 
 with open(json_file_path, 'r') as file:
     data = json.load(file)
@@ -58,6 +58,6 @@ for section, fields in field_names.items():
 mapping_df = pd.DataFrame(all_fields)
 
 # Save the DataFrame to CSV
-mapping_df.to_csv('field_mapping_template_with_samples.csv', index=True)
+mapping_df.to_csv('../data/mappings/field_mapping_template.csv', index=True)
 
 mapping_df.head()  # Display the first few rows as output
