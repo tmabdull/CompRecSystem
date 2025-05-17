@@ -45,8 +45,8 @@ def extract_street_components(address_str):
 def process_subject_address(subject_data):
     """Process subject property address"""
     # Get the raw address strings
-    full_address = subject_data.get('address', '')
-    city_province_zip = subject_data.get('subject_city_province_zip', '')
+    full_address = subject_data.get('address', '') or ''
+    city_province_zip = subject_data.get('subject_city_province_zip', '') or ''
     
     # Clean the strings
     full_address = full_address.replace(',', ' ').strip()
@@ -76,13 +76,12 @@ def process_subject_address(subject_data):
     
     # Create standardized address dictionary
     standardized = {
-        'unit_number': unit_number,
-        'street_number': street_number,
-        'street_name': street_name,
-        'city': city,
-        'province': province,
-        'postal_code': standardize_postal_code(postal_code),
-        'full_address': full_address
+        'std_unit_number': unit_number,
+        'std_street_number': street_number,
+        'std_street_name': street_name,
+        'std_city': city,
+        'std_province': province,
+        'std_postal_code': standardize_postal_code(postal_code)
     }
     
     # Create standardized full address
@@ -100,14 +99,18 @@ def process_subject_address(subject_data):
     if postal_code:
         std_parts.append(postal_code)
     
-    standardized['standardized_full'] = ', '.join(std_parts)
+    standardized['std_full_address'] = ', '.join(std_parts)
     return standardized
 
 def process_comp_address(comp_data):
     """Process comp property address"""
     # Get the raw address strings
-    address = comp_data.get('address', '').replace(',', ' ').strip()
-    city_province = comp_data.get('city_province', '').replace(',', ' ').strip()
+    address = comp_data.get('address', '') or ''
+    city_province = comp_data.get('city_province', '') or ''
+    
+    # Clean the strings
+    address = address.replace(',', ' ').strip()
+    city_province = city_province.replace(',', ' ').strip()
     
     # Extract city, province, postal code from city_province
     parts = city_province.split()
@@ -128,13 +131,12 @@ def process_comp_address(comp_data):
     
     # Create standardized address dictionary
     standardized = {
-        'unit_number': unit_number,
-        'street_number': street_number,
-        'street_name': street_name,
-        'city': city,
-        'province': province,
-        'postal_code': standardize_postal_code(postal_code),
-        'full_address': address
+        'std_unit_number': unit_number,
+        'std_street_number': street_number,
+        'std_street_name': street_name,
+        'std_city': city,
+        'std_province': province,
+        'std_postal_code': standardize_postal_code(postal_code)
     }
     
     # Create standardized full address
@@ -152,17 +154,22 @@ def process_comp_address(comp_data):
     if postal_code:
         std_parts.append(postal_code)
     
-    standardized['standardized_full'] = ', '.join(std_parts)
+    standardized['std_full_address'] = ', '.join(std_parts)
     return standardized
 
 def process_property_address(property_data):
     """Process property address with province standardization"""
-    display(property_data)
-    # Get address components
-    address = property_data.get('address', '').strip()
-    city = property_data.get('city', '').strip()
-    province = property_data.get('province', '').strip()
-    postal_code = property_data.get('postal_code', '').strip()
+    # Get address components - handle None values
+    address = property_data.get('address', '') or ''
+    city = property_data.get('city', '') or ''
+    province = property_data.get('province', '') or ''
+    postal_code = property_data.get('postal_code', '') or ''
+    
+    # Clean the strings
+    address = address.strip()
+    city = city.strip()
+    province = province.strip()
+    postal_code = postal_code.strip()
     
     # Standardize province (convert full name to abbreviation)
     province_map = {
@@ -191,13 +198,12 @@ def process_property_address(property_data):
     
     # Create standardized address dictionary
     standardized = {
-        'unit_number': unit_number,
-        'street_number': street_number,
-        'street_name': street_name,
-        'city': city,
-        'province': province,
-        'postal_code': standardize_postal_code(postal_code),
-        'full_address': address
+        'std_unit_number': unit_number,
+        'std_street_number': street_number,
+        'std_street_name': street_name,
+        'std_city': city,
+        'std_province': province,
+        'std_postal_code': standardize_postal_code(postal_code)
     }
     
     # Create standardized full address
@@ -215,7 +221,7 @@ def process_property_address(property_data):
     if postal_code:
         std_parts.append(postal_code)
     
-    standardized['standardized_full'] = ', '.join(std_parts)
+    standardized['std_full_address'] = ', '.join(std_parts)
     return standardized
 
 # Data cleaning functions
@@ -467,7 +473,7 @@ def convert_column_types(df, mapping_df, section_name):
         canonical_field = row['canonical_field']
         
         # Skip if no canonical field specified or if it's the same as original
-        if pd.isna(canonical_field) or canonical_field == '' or canonical_field == orig_field:
+        if pd.isna(canonical_field) or canonical_field == '' or canonical_field == 'split' or canonical_field == orig_field:
             continue
             
         # Add to rename dictionary if the original field exists in the dataframe
@@ -480,6 +486,7 @@ def convert_column_types(df, mapping_df, section_name):
     
     # Drop excluded features
     excluded_features = [
+        # 'address', 'subject_city_province_zip', 'city_province', 'city', 'province', 'postal_code',
         "site_dimensions", "units_sq_ft", 
         "lot_size", "lot_size_sf",
         "water_heater", "exterior_finish", 
