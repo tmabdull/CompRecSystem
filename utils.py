@@ -124,9 +124,10 @@ def standardize_street_type(street_name):
         
     return ' '.join(words)
 
-def normalize_address_components(unit_number, street_number, street_name):
+def normalize_address_components(unit_number, street_number, street_name, city=None, province=None, postal_code=None):
     """
     Normalize address components by handling special cases and standardizing formats.
+    Also prepares components for deduplication by standardizing case and format.
     """
     # Standardize unit number format
     if unit_number:
@@ -136,13 +137,34 @@ def normalize_address_components(unit_number, street_number, street_name):
     if street_number:
         street_number = street_number.strip()
     
-    # Standardize street name and handle multi-word street names
+    # Standardize street name with proper capitalization
     if street_name:
         street_name = street_name.strip()
-        # Standardize street type abbreviations
         street_name = standardize_street_type(street_name)
+
+        # Apply title case (capitalize first letter of each word)
+        street_name = street_name.title()
     
-    return unit_number, street_number, street_name
+    # Normalize city with proper capitalization
+    if city:
+        city = city.strip()
+
+        # Apply title case (capitalize first letter of each word)
+        street_name = street_name.title()
+    
+    # Standardize province (already handled in our existing functions)
+    if province:
+        if province in province_map:
+            province = province_map[province]
+        province = province.strip().upper()
+    
+    # Standardize postal code (remove spaces)
+    if postal_code:
+        postal_code = standardize_postal_code(postal_code)
+        # Remove spaces for matching purposes
+        postal_code = postal_code.replace(' ', '')
+    
+    return unit_number, street_number, street_name, city, province, postal_code
 
 def parse_address(address_str):
     """
@@ -185,6 +207,81 @@ def parse_address(address_str):
     # If no patterns match, return the whole string as street_name
     return None, None, address_str
 
+def create_standardized_address_dict(address, city, province, postal_code):
+    """
+    Create a standardized address dictionary and full address string from components.
+    
+    Args:
+        address: Contains unparsed unit/apt number, street number, and street name if they exist
+        city: city name (not standardized) if it exists
+        province: province name or code (not standardized) if it exists
+        postal_code: postal code (not standardized) if it exists
+        
+    Returns:
+        Dictionary with standardized address components and full address
+    """
+    
+    # Parse and normalize address components
+    unit_number, street_number, street_name = parse_address(address)
+
+    # Normalize all components for standardization and deduplication
+    unit_number, street_number, street_name, city, province, postal_code = normalize_address_components(
+        unit_number, street_number, street_name, city, province, postal_code
+    )
+
+    # Create standardized address dictionary
+    standardized = {
+        'std_unit_number': unit_number,
+        'std_street_number': street_number,
+        'std_street_name': street_name,
+        'std_city': city,
+        'std_province': province,
+        'std_postal_code': postal_code
+    }
+    
+    # Create standardized full address with conventional formatting
+    std_parts = []
+
+    
+    
+    # Combining street num and name so they're not comma separated
+    street_address_parts = []
+
+    if street_number:
+        street_address_parts.append(street_number)
+    if street_name:
+        street_address_parts.append(street_name)
+    
+    # Join the street address parts with spaces instead of commas
+    if street_address_parts:
+        std_parts.append(" ".join(street_address_parts))
+    
+    # Add city, province, postal code with conventional formatting
+    if unit_number:
+        std_parts.append(f"Unit {unit_number}")
+    if city:
+        std_parts.append(city)
+    if province:
+        std_parts.append(province)
+    if postal_code:
+        std_parts.append(postal_code)
+
+    # location_parts = []
+    # if city:
+    #     location_parts.append(city)
+    # if province:
+    #     location_parts.append(province)
+    # if postal_code:
+    #     location_parts.append(postal_code)
+    
+    # # Join location parts with conventional formatting
+    # if location_parts:
+    #     std_parts.append(", ".join(location_parts))
+    
+    standardized['std_full_address'] = ", ".join(std_parts)
+    
+    return standardized
+
 # Process different address types
 def process_subject_address(subject_data):
     """Process subject property address"""
@@ -216,9 +313,6 @@ def process_subject_address(subject_data):
         # Last element is likely province
         province = city_province_parts[-1]
 
-        if province in province_map:
-            province = province_map[province]
-
         # Everything else is city
         city = ' '.join(city_province_parts[:-1])
     
@@ -236,38 +330,9 @@ def process_subject_address(subject_data):
         if city_pos > 0:
             street_address = full_address[:city_pos].strip()
     
-    # Parse and normalize address components using our helper functions
-    unit_number, street_number, street_name = parse_address(street_address)
-    unit_number, street_number, street_name = normalize_address_components(unit_number, street_number, street_name)
-    
-    # Create standardized address dictionary with std_ prefix
-    standardized = {
-        'std_unit_number': unit_number,
-        'std_street_number': street_number,
-        'std_street_name': street_name,
-        'std_city': city,
-        'std_province': province,
-        'std_postal_code': standardize_postal_code(postal_code)
-    }
-    
-    # Create standardized full address
-    std_parts = []
-    if unit_number:
-        std_parts.append(f"Unit {unit_number}")
-    if street_number:
-        std_parts.append(street_number)
-    if street_name:
-        std_parts.append(street_name)
-    if city:
-        std_parts.append(city)
-    if province:
-        std_parts.append(province)
-    if postal_code:
-        std_parts.append(standardize_postal_code(postal_code))
-    
-    standardized['std_full_address'] = ', '.join(std_parts)
-    
-    return standardized
+    return create_standardized_address_dict(
+        street_address, city, province, postal_code
+    )
 
 def process_comp_address(comp_data):
     """Process comp property address"""
@@ -278,11 +343,7 @@ def process_comp_address(comp_data):
     # Clean the strings
     address.strip()
     city_province_postal.strip()
-    
-    # Parse the address components using our improved helper function
-    unit_number, street_number, street_name = parse_address(address)
-    unit_number, street_number, street_name = normalize_address_components(unit_number, street_number, street_name)
-    
+
     # Parse city_province_postal which may contain all three components
     # Look for postal code pattern at the end
     postal_code = None
@@ -314,38 +375,9 @@ def process_comp_address(comp_data):
         city = city.replace("Alberta", "").strip().rstrip(',')
         province = "AB"
     
-    # If province is a full name, convert to abbreviation
-    if province in province_map:
-        province = province_map[province]
-    
-    # Create standardized address dictionary with std_ prefix
-    standardized = {
-        'std_unit_number': unit_number,
-        'std_street_number': street_number,
-        'std_street_name': street_name,
-        'std_city': city,
-        'std_province': province,
-        'std_postal_code': standardize_postal_code(postal_code)
-    }
-    
-    # Create standardized full address
-    std_parts = []
-    if unit_number:
-        std_parts.append(f"Unit {unit_number}")
-    if street_number:
-        std_parts.append(street_number)
-    if street_name:
-        std_parts.append(street_name)
-    if city:
-        std_parts.append(city)
-    if province:
-        std_parts.append(province)
-    if postal_code:
-        std_parts.append(standardize_postal_code(postal_code))
-    
-    standardized['std_full_address'] = ', '.join(std_parts)
-    
-    return standardized
+    return create_standardized_address_dict(
+        address, city, province, postal_code
+    )
 
 def process_property_address(property_data):
     """Process property address with province standardization"""
@@ -360,43 +392,10 @@ def process_property_address(property_data):
     city = city.strip()
     province = province.strip()
     postal_code = postal_code.strip()
-    
-    # If province is a full name, convert to abbreviation
-    if province in province_map:
-        province = province_map[province]
-    
-    # Parse and normalize address components
-    unit_number, street_number, street_name = parse_address(address)
-    unit_number, street_number, street_name = normalize_address_components(unit_number, street_number, street_name)
-    
-    # Create standardized address dictionary
-    standardized = {
-        'std_unit_number': unit_number,
-        'std_street_number': street_number,
-        'std_street_name': street_name,
-        'std_city': city,
-        'std_province': province,
-        'std_postal_code': standardize_postal_code(postal_code)
-    }
-    
-    # Create standardized full address
-    std_parts = []
-    if unit_number:
-        std_parts.append(f"Unit {unit_number}")
-    if street_number:
-        std_parts.append(street_number)
-    if street_name:
-        std_parts.append(street_name)
-    if city:
-        std_parts.append(city)
-    if province:
-        std_parts.append(province)
-    if postal_code:
-        std_parts.append(standardize_postal_code(postal_code))
-    
-    standardized['std_full_address'] = ', '.join(std_parts)
-    
-    return standardized
+
+    return create_standardized_address_dict(
+        address, city, province, postal_code
+    )
 
 # Data cleaning functions
 def clean_string(value):
@@ -783,31 +782,6 @@ def load_and_process_data(json_file_path, mapping_file_path):
     return subjects_df, comps_df, properties_df
 
 # Deduplication
-def normalize_for_deduplication(df):
-    """
-    Create normalized versions of address fields for duplicate detection.
-    Handles case differences and minor formatting variations.
-    """
-    # Create a copy to avoid modifying the original DataFrame
-    df_norm = df.copy()
-    
-    # Normalize address fields for case-insensitive matching
-    if 'std_street_name' in df.columns:
-        df_norm['norm_street_name'] = df['std_street_name'].str.lower() if df['std_street_name'].dtype == 'object' else df['std_street_name']
-    
-    if 'std_city' in df.columns:
-        df_norm['norm_city'] = df['std_city'].str.lower() if df['std_city'].dtype == 'object' else df['std_city']
-    
-    if 'std_street_number' in df.columns:
-        # Keep street number as is, since it should be exact
-        df_norm['norm_street_number'] = df['std_street_number']
-    
-    if 'std_postal_code' in df.columns:
-        # Remove spaces from postal codes for matching
-        df_norm['norm_postal_code'] = df['std_postal_code'].str.replace(' ', '') if df['std_postal_code'].dtype == 'object' else df['std_postal_code']
-    
-    return df_norm
-
 def merge_duplicates_keep_most_complete(df, subset_cols):
     """
     Merge duplicate rows in a DataFrame based on subset_cols, keeping the row with the most non-null values.
