@@ -34,69 +34,6 @@ def standardize_postal_code(postal_code):
         return f"{postal_code[:3]} {postal_code[3:]}"
     return postal_code
 
-def extract_street_components(address_str):
-    """Extract street number and name from address string"""
-    # Remove commas and strip
-    address_str = address_str.replace(',', ' ').strip()
-    components = address_str.split()
-    
-    # Handle case with two numbers at the beginning (unit and street number)
-    if len(components) >= 2 and components[0].isdigit() and components[1].isdigit():
-        unit_number = components[0]
-        street_number = components[1]
-        street_name = ' '.join(components[2:])
-    else:
-        # Regular address format
-        match = re.match(r'^(\d+(?:-\d+)?(?:\s+\w+)?)\s+(.+)$', address_str)
-        if match:
-            unit_number = None
-            street_number = match.group(1)
-            street_name = match.group(2)
-        else:
-            unit_number = None
-            street_number = None
-            street_name = address_str
-    
-    return unit_number, street_number, street_name
-
-def standardize_street_type(street_name):
-    """Standardize common street type abbreviations"""
-    street_type_map = {
-        'avenue': 'Ave',
-        'boulevard': 'Blvd',
-        'circle': 'Cir',
-        'court': 'Ct',
-        'crescent': 'Cres',
-        'drive': 'Dr',
-        'expressway': 'Expy',
-        'freeway': 'Fwy',
-        'highway': 'Hwy',
-        'lane': 'Ln',
-        'parkway': 'Pkwy',
-        'place': 'Pl',
-        'road': 'Rd',
-        'square': 'Sq',
-        'street': 'St',
-        'terrace': 'Ter',
-        'trail': 'Trl',
-        'way': 'Way'
-    }
-    
-    if not street_name:
-        return street_name
-        
-    # Split into words
-    words = street_name.split()
-    if not words:
-        return street_name
-        
-    # Check if the last word is a street type that should be standardized
-    last_word = words[-1].lower()
-    if last_word in street_type_map:
-        words[-1] = street_type_map[last_word]
-        
-    return ' '.join(words)
-
 def extract_complex_address_components(address_str):
     """
     Extract components from complex address formats including various unit formats.
@@ -723,7 +660,7 @@ def convert_column_types(df, mapping_df, section_name):
     
     # Drop excluded features
     excluded_features = [
-        # 'address', 'subject_city_province_zip', 'city_province', 'city', 'province', 'postal_code',
+        'address', 'subject_city_province_zip', 'city_province', 'city', 'province', 'postal_code',
         "site_dimensions", "units_sq_ft", 
         "lot_size", "lot_size_sf",
         "water_heater", "exterior_finish", 
