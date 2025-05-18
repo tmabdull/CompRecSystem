@@ -124,6 +124,26 @@ def standardize_street_type(street_name):
         
     return ' '.join(words)
 
+def normalize_address_components(unit_number, street_number, street_name):
+    """
+    Normalize address components by handling special cases and standardizing formats.
+    """
+    # Standardize unit number format
+    if unit_number:
+        unit_number = unit_number.strip()
+    
+    # Standardize street number format
+    if street_number:
+        street_number = street_number.strip()
+    
+    # Standardize street name and handle multi-word street names
+    if street_name:
+        street_name = street_name.strip()
+        # Standardize street type abbreviations
+        street_name = standardize_street_type(street_name)
+    
+    return unit_number, street_number, street_name
+
 def parse_address(address_str):
     """
     Parse address string into components.
@@ -164,26 +184,6 @@ def parse_address(address_str):
     
     # If no patterns match, return the whole string as street_name
     return None, None, address_str
-
-def normalize_address_components(unit_number, street_number, street_name):
-    """
-    Normalize address components by handling special cases and standardizing formats.
-    """
-    # Standardize unit number format
-    if unit_number:
-        unit_number = unit_number.strip()
-    
-    # Standardize street number format
-    if street_number:
-        street_number = street_number.strip()
-    
-    # Standardize street name and handle multi-word street names
-    if street_name:
-        street_name = street_name.strip()
-        # Standardize street type abbreviations
-        street_name = standardize_street_type(street_name)
-    
-    return unit_number, street_number, street_name
 
 # Process different address types
 def process_subject_address(subject_data):
@@ -782,4 +782,52 @@ def load_and_process_data(json_file_path, mapping_file_path):
     
     return subjects_df, comps_df, properties_df
 
+# Deduplication
+def normalize_for_deduplication(df):
+    """
+    Create normalized versions of address fields for duplicate detection.
+    Handles case differences and minor formatting variations.
+    """
+    # Create a copy to avoid modifying the original DataFrame
+    df_norm = df.copy()
+    
+    # Normalize address fields for case-insensitive matching
+    if 'std_street_name' in df.columns:
+        df_norm['norm_street_name'] = df['std_street_name'].str.lower() if df['std_street_name'].dtype == 'object' else df['std_street_name']
+    
+    if 'std_city' in df.columns:
+        df_norm['norm_city'] = df['std_city'].str.lower() if df['std_city'].dtype == 'object' else df['std_city']
+    
+    if 'std_street_number' in df.columns:
+        # Keep street number as is, since it should be exact
+        df_norm['norm_street_number'] = df['std_street_number']
+    
+    if 'std_postal_code' in df.columns:
+        # Remove spaces from postal codes for matching
+        df_norm['norm_postal_code'] = df['std_postal_code'].str.replace(' ', '') if df['std_postal_code'].dtype == 'object' else df['std_postal_code']
+    
+    return df_norm
 
+def merge_duplicates_keep_most_complete(df, subset_cols):
+    """
+    Merge duplicate rows in a DataFrame based on subset_cols, keeping the row with the most non-null values.
+    Logs the number of entries before and after merging.
+    """
+    print(f"Number of entries before merging duplicates: {len(df)}")
+    
+    # Create a completeness score (count of non-null values per row)
+    df['completeness'] = df.notnull().sum(axis=1)
+    
+    # Sort by completeness descending so that the most complete rows come first
+    df_sorted = df.sort_values(by='completeness', ascending=False)
+    
+    # Drop duplicates keeping the first (most complete) row
+    df_deduped = df_sorted.drop_duplicates(subset=subset_cols, keep='first')
+    
+    # Drop the completeness column
+    df_deduped = df_deduped.drop(columns=['completeness'])
+    
+    print(f"Number of entries after merging duplicates: {len(df_deduped)}")
+    print(f"Removed {len(df) - len(df_deduped)} duplicate entries")
+    
+    return df_deduped
