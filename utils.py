@@ -3,25 +3,22 @@ import re
 import pandas as pd
 import numpy as np
 import json
-from IPython.display import display, HTML
 
-# Standardize province (convert full name to abbreviation)
-province_map = {
-    'Alberta': 'AB',
-    'British Columbia': 'BC',
-    'Manitoba': 'MB',
-    'New Brunswick': 'NB',
-    'Newfoundland': 'NL',
-    'Newfoundland And Labrador': 'NL',
-    'Northwest Territories': 'NT',
-    'Nova Scotia': 'NS',
-    'Nunavut': 'NU',
-    'Ontario': 'ON',
-    'Prince Edward Island': 'PE',
-    'Quebec': 'QC',
-    'Saskatchewan': 'SK',
-    'Yukon': 'YT'
-}
+def save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number:int=None, idx:bool=False):
+    '''Save processed data to CSV files for further analysis'''
+    
+    v_str, v_str_spaces = "", ""
+    if version_number:
+        v_str = f"_v{version_number}"
+        v_str_spaces = f" v{version_number}"
+    
+    processed_path_prefix = "./data/processed/processed_"
+
+    subjects_df.to_csv(f"{processed_path_prefix}subjects{v_str}.csv", index=idx)
+    comps_df.to_csv(f"{processed_path_prefix}comps{v_str}.csv", index=idx)
+    properties_df.to_csv(f"{processed_path_prefix}properties{v_str}.csv", index=idx)
+
+    print(f"Processed data{v_str_spaces} saved to CSV files.")
 
 # Address parsing functions
 def standardize_postal_code(postal_code):
@@ -152,7 +149,24 @@ def normalize_address_components(unit_number, street_number, street_name, city=N
         # Apply title case (capitalize first letter of each word)
         street_name = street_name.title()
     
-    # Standardize province (already handled in our existing functions)
+    # Standardize province (convert full name to abbreviation)
+    province_map = {
+        'Alberta': 'AB',
+        'British Columbia': 'BC',
+        'Manitoba': 'MB',
+        'New Brunswick': 'NB',
+        'Newfoundland': 'NL',
+        'Newfoundland And Labrador': 'NL',
+        'Northwest Territories': 'NT',
+        'Nova Scotia': 'NS',
+        'Nunavut': 'NU',
+        'Ontario': 'ON',
+        'Prince Edward Island': 'PE',
+        'Quebec': 'QC',
+        'Saskatchewan': 'SK',
+        'Yukon': 'YT'
+    }
+
     if province:
         if province in province_map:
             province = province_map[province]
@@ -242,8 +256,6 @@ def create_standardized_address_dict(address, city, province, postal_code):
     # Create standardized full address with conventional formatting
     std_parts = []
 
-    
-    
     # Combining street num and name so they're not comma separated
     street_address_parts = []
 
@@ -265,18 +277,6 @@ def create_standardized_address_dict(address, city, province, postal_code):
         std_parts.append(province)
     if postal_code:
         std_parts.append(postal_code)
-
-    # location_parts = []
-    # if city:
-    #     location_parts.append(city)
-    # if province:
-    #     location_parts.append(province)
-    # if postal_code:
-    #     location_parts.append(postal_code)
-    
-    # # Join location parts with conventional formatting
-    # if location_parts:
-    #     std_parts.append(", ".join(location_parts))
     
     standardized['std_full_address'] = ", ".join(std_parts)
     
@@ -603,6 +603,8 @@ def apply_specific_processing(subjects_df, comps_df, properties_df):
     if 'gla' in properties_df.columns:
         properties_df['gla'] = properties_df['gla'].apply(process_gla)
 
+    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=3, idx=True)
+
     # Remove units from numeric fields
     numeric_fields_with_units = [
         'distance_to_subject', 
@@ -621,6 +623,8 @@ def apply_specific_processing(subjects_df, comps_df, properties_df):
         for field in numeric_fields_with_units:
             if field in df.columns:
                 df[field] = df[field].apply(remove_units_and_symbols)
+
+    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=4, idx=True)
     
     return subjects_df, comps_df, properties_df
 
@@ -716,24 +720,21 @@ def convert_column_types(df, mapping_df, section_name):
     
     return df
 
-def load_and_process_data(json_file_path, mapping_file_path):
+def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", mapping_file_path="./data/mappings/complete_field_mappings.csv"):
     """
-    Load JSON data and field mapping, then process the data
+    Load JSON raw data and field mapping, then process the data
     """
     # Load the JSON data
     with open(json_file_path, 'r') as file:
-        data = json.load(file)
-    
-    # Load the field mapping
-    mapping_df = pd.read_csv(mapping_file_path)
-    
+        raw_data = json.load(file)
+
     # Initialize lists to store processed data
     subjects = []
     comps = []
     properties = []
     
     # Process each appraisal
-    for appraisal in data.get('appraisals', []):
+    for appraisal in raw_data.get('appraisals', []):
         # Process subject property
         if 'subject' in appraisal:
             subject_data = appraisal['subject'].copy()
@@ -756,6 +757,8 @@ def load_and_process_data(json_file_path, mapping_file_path):
         if 'properties' in appraisal:
             for prop in appraisal['properties']:
                 prop_data = prop.copy()
+                # Add standardized address
+                prop_data.update(process_property_address(prop_data))
                 # Add reference to subject property
                 if 'subject' in appraisal and 'address' in appraisal['subject']:
                     prop_data['subject_address'] = appraisal['subject']['address']
@@ -765,19 +768,31 @@ def load_and_process_data(json_file_path, mapping_file_path):
     subjects_df = pd.DataFrame(subjects)
     comps_df = pd.DataFrame(comps)
     properties_df = pd.DataFrame(properties)
+
+    # subjects_df.head()
+    # comps_df.head()
+    # properties_df.head()
+
+    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=1, idx=True)
     
     # Clean the DataFrames (basic cleaning)
     subjects_df = clean_dataframe(subjects_df)
     comps_df = clean_dataframe(comps_df)
     properties_df = clean_dataframe(properties_df)
+
+    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=2, idx=True)
     
     # Apply specific field processing
     subjects_df, comps_df, properties_df = apply_specific_processing(subjects_df, comps_df, properties_df)
     
     # Convert column types
-    subjects_df = convert_column_types(subjects_df, mapping_df[mapping_df['section'] == 'subject'])
-    comps_df = convert_column_types(comps_df, mapping_df[mapping_df['section'] == 'comps'])
-    properties_df = convert_column_types(properties_df, mapping_df[mapping_df['section'] == 'properties'])
+    mapping_df = pd.read_csv("./data/mappings/complete_field_mappings.csv") # contains user-filled data types (and replacement names if needed) for each col
+
+    subjects_df = convert_column_types(subjects_df, mapping_df[mapping_df['section'] == 'subject'], 'subject')
+    comps_df = convert_column_types(comps_df, mapping_df[mapping_df['section'] == 'comps'], 'comps')
+    properties_df = convert_column_types(properties_df, mapping_df[mapping_df['section'] == 'properties'], 'properties')
+
+    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=5, idx=True)
     
     return subjects_df, comps_df, properties_df
 
@@ -805,3 +820,29 @@ def merge_duplicates_keep_most_complete(df, subset_cols):
     print(f"Removed {len(df) - len(df_deduped)} duplicate entries")
     
     return df_deduped
+
+def handle_duplicates(subjects_df, comps_df, properties_df):
+    '''
+    Handle duplicates in all three dataframes by keeping the most complete records.
+    '''
+    # Define deduplication keys for each dataframe using the std_ fields
+    subject_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
+    comps_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
+    properties_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
+
+    # Filter keys to only include columns that exist
+    subject_dedup_keys = [k for k in subject_dedup_keys if k in subjects_df.columns]
+    comps_dedup_keys = [k for k in comps_dedup_keys if k in comps_df.columns]
+    properties_dedup_keys = [k for k in properties_dedup_keys if k in properties_df.columns]
+
+    # Deduplicate each dataframe
+    print("\nDeduplicating Subject Properties:")
+    subjects_df = merge_duplicates_keep_most_complete(subjects_df, subject_dedup_keys)
+
+    print("\nDeduplicating Comp Properties:")
+    comps_df = merge_duplicates_keep_most_complete(comps_df, comps_dedup_keys)
+
+    print("\nDeduplicating Available Properties:")
+    properties_df = merge_duplicates_keep_most_complete(properties_df, properties_dedup_keys)
+
+    return subjects_df, comps_df, properties_df
