@@ -45,3 +45,52 @@
         - can have "Sq M" or "SQ M" or "SqM" -> extract the num before Sq M (ex. "n/a x n/a 500 SQ M", "486 Sq M")
             - if "sqm" or "sq m" in .lower(), go backward from s until reach digit, then read backward until the first char that's not number or "."
         - THEN rename to lot_size_sf
+
+
+
+
+Now that we have the object dict returned by build_property_recommendation_system, what are the next steps according to our MVP development plan? Here is a portion of our dev plan as a reminder:
+----
+Explainability Layer
+To satisfy the explainability requirement, we'll implement:
+
+SHAP (SHapley Additive exPlanations):
+Calculate SHAP values for each feature to quantify its contribution to the model's decision
+Generate natural language explanations based on the top contributing features
+Example output: "This property was selected as a comp primarily due to its similar GLA (1044 sq ft vs 1044 sq ft), identical bedroom count (3), and recent sale date (Feb 2025)"
+
+Feature Importance Visualization:
+Create waterfall charts showing how each feature contributes to the final similarity score
+Highlight features where the comp property closely matches the subject property
+
+Comparison Table:
+Generate a side-by-side comparison of the subject property and recommended comps
+Highlight similarities and differences with visual cues
+----
+Self-Improvement Mechanism
+For the bonus requirement of self-improvement, we'll implement a simple but effective approach:
+
+Feedback Collection Interface:
+Allow users to accept/reject recommended comps
+Provide a mechanism to select alternative comps not in the top recommendations
+Collect explicit ratings on a 1-5 scale for each recommendation
+
+Continuous Learning Pipeline:
+Store all feedback in a dedicated database table
+Implement a scheduled retraining job (weekly/monthly)
+Use feedback as additional training data, with higher weights for recent feedback
+Track model performance metrics over time to verify improvement
+
+Simple A/B Testing Framework:
+Maintain two versions of the model (current and candidate)
+Randomly serve recommendations from each model
+Compare acceptance rates and explicit ratings
+Promote candidate model when it shows statistically significant improvement
+----
+In addition to the above, please analyze the attached README as well as these project requirements before giving your response for our MVP:
+- Create a recommendation system that selects the top 3 most comparable properties for a given subject property
+- The system should analyze a subject property and hundreds of nearby candidates to recommend the best comps
+- Use a labeled dataset of appraisals where each has a subject property, candidate properties, and selected comps
+- Evaluate your system on a validation dataset of unseen appraisals
+- Add an explainability layer that outputs reasoning for each recommended comp (e.g., similar GLA, lot size, recent sale date)
+- Bonus: Make the system self-improving by incorporating user feedback and updating its model accordingly
