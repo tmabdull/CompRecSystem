@@ -629,6 +629,19 @@ def apply_specific_processing(subjects_df, comps_df, properties_df):
     return subjects_df, comps_df, properties_df
 
 # Data type conversion function
+EXCLUDED_FEATURES_PREPROCESS = set([
+    'address', 'subject_city_province_zip', 'city_province', 'city', 'province', 'postal_code',
+    "site_dimensions", "units_sq_ft", 
+    "lot_size", "lot_size_sf",
+    "water_heater", "exterior_finish", 
+    "style", "levels",
+    "effective_age", "subject_age", "age",
+    "effective_date", "close_date", "sale_date",
+    "public_remarks"
+])
+
+ORDINAL_FEATURES = set(['condition', 'condition_relative', 'location_similarity'])
+
 def convert_column_types(df, mapping_df, section_name):
     """
     Convert dataframe columns to their assigned data types based on mapping.
@@ -662,16 +675,7 @@ def convert_column_types(df, mapping_df, section_name):
         df.rename(columns=rename_dict, inplace=True)
     
     # Drop excluded features
-    excluded_features = [
-        'address', 'subject_city_province_zip', 'city_province', 'city', 'province', 'postal_code',
-        "site_dimensions", "units_sq_ft", 
-        "lot_size", "lot_size_sf",
-        "water_heater", "exterior_finish", 
-        "style", "levels",
-        "effective_age", "subject_age", "age",
-        "effective_date", "close_date", "sale_date"
-    ]
-    cols_to_drop = [col for col in excluded_features if col in df.columns]
+    cols_to_drop = [col for col in EXCLUDED_FEATURES_PREPROCESS if col in df.columns]
     if cols_to_drop:
         df.drop(columns=cols_to_drop, inplace=True)
     
@@ -701,14 +705,40 @@ def convert_column_types(df, mapping_df, section_name):
                 df[col] = df[col].astype('category')
             elif dtype == 'ordinal':
                 # Handle ordinal fields based on section and field name
-                if section_name == 'subject' and col == 'condition':
+                # Creating a new numeric version of each ordinal col
+                #   Categorical (original) + numerical can be used by LightGBM
+                #   Numerical will be used by KNN
+
+                if section_name == 'subject' and col in ORDINAL_FEATURES:
                     # For subject condition (absolute rating)
-                    condition_order = ['Poor', 'Fair', 'Average', 'Good', 'Excellent']
+
+                    # Numerical (new col)
+                    condition_map = {
+                        'Poor': 1,
+                        'Fair': 2,
+                        'Average': 3,
+                        'Good': 4,
+                        'Excellent': 5
+                    }
+                    df[f'{col}_score'] = df[col].map(condition_map)
+
+                    # Original col will be made categorical
+                    condition_order = list(condition_map.keys())
                     df[col] = pd.Categorical(df[col], categories=condition_order, ordered=True)
-                elif section_name == 'comps' and col in ['condition_relative', 'location_similarity']:
-                    # For comps comparison fields (relative rating)
-                    comparison_order = ['Inferior', 'Similar', 'Superior']
+
+                elif section_name == 'comps' and col in ORDINAL_FEATURES:
+                    # For comps comparison fields (relative rating) - condition_relative and location_similarity
+                    comparison_map = {
+                        'Inferior': 1,
+                        'Similar': 2,
+                        'Superior': 3
+                    }
+                    df[f'{col}_score'] = df[col].map(comparison_map)
+
+                    # Original col will be made categorical
+                    comparison_order = list(comparison_map.keys())
                     df[col] = pd.Categorical(df[col], categories=comparison_order, ordered=True)
+
             elif dtype == 'string':
                 # Keep strings as is, but handle NaN values properly
                 df[col] = df[col].astype(object)
@@ -852,66 +882,106 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.neighbors import NearestNeighbors
 import lightgbm as lgb
+import math
 
-def select_features_for_knn(subjects_df, properties_df):
+def select_features_dynamically(subjects_df, properties_df, missing_threshold=0.3):
     """
-    Select appropriate features for KNN based on missing value analysis
-    """
-    # Features with relatively low missing values across both dataframes
-    knn_features = [
-        'gla',                # Core size metric
-        'bedrooms',           # Important room count
-        'full_baths',         # Important feature with few missing values in subjects
-        'structure_type',     # Property type is usually available
-        'cooling',            # Reasonable availability
-        'heating'             # Good availability
-    ]
+    Dynamically select features for modeling based on data quality metrics.
     
-    # Check which features exist and have sufficient data
-    available_features = []
-    for feature in knn_features:
-        if feature in subjects_df.columns and feature in properties_df.columns:
-            # Calculate missing percentage
-            subj_missing = subjects_df[feature].isna().mean()
-            prop_missing = properties_df[feature].isna().mean()
+    Args:
+        subjects_df: DataFrame containing subject properties
+        properties_df: DataFrame containing available properties
+        missing_threshold: Maximum acceptable proportion of missing values (default: 0.3)
+        
+    Returns:
+        Dictionary containing selected features for different model components
+    """
+    # Get all numeric and categorical columns
+    numeric_cols = []
+    categorical_cols = []
+    
+    # Check data types in subjects_df
+    for col in subjects_df.columns:
+        if col in EXCLUDED_FEATURES_PREPROCESS:
+            continue
             
-            # Only include features with less than 30% missing values
-            if subj_missing < 0.3 and prop_missing < 0.3:
-                available_features.append(feature)
+        if pd.api.types.is_numeric_dtype(subjects_df[col]):
+            numeric_cols.append(col)
+        elif pd.api.types.is_categorical_dtype(subjects_df[col]) or subjects_df[col].dtype == 'object':
+            if col not in ORDINAL_FEATURES:  # Handle ordinals separately
+                categorical_cols.append(col)
     
-    print(f"Selected KNN features: {available_features}")
-    return available_features
+    # Calculate missing value proportions
+    missing_proportions = {}
+    
+    for col in numeric_cols + categorical_cols:
+        # Check if column exists in both dataframes
+        if col in subjects_df.columns and col in properties_df.columns:
+            subj_missing = subjects_df[col].isna().mean()
+            prop_missing = properties_df[col].isna().mean()
+            missing_proportions[col] = max(subj_missing, prop_missing)
+    
+    # Select features based on missing value threshold
+    selected_features = {
+        'numeric': [col for col in numeric_cols 
+                   if col in missing_proportions 
+                   and missing_proportions[col] < missing_threshold],
+        'categorical': [col for col in categorical_cols 
+                       if col in missing_proportions 
+                       and missing_proportions[col] < missing_threshold],
+        'ordinal': [col for col in ORDINAL_FEATURES 
+                   if col in subjects_df.columns and col in properties_df.columns
+                   and col in missing_proportions 
+                   and missing_proportions[col] < missing_threshold]
+    }
+    
+    # Log the selected features
+    print(f"Selected {len(selected_features['numeric'])} numeric features: {selected_features['numeric']}")
+    print(f"Selected {len(selected_features['categorical'])} categorical features: {selected_features['categorical']}")
+    print(f"Selected {len(selected_features['ordinal'])} ordinal features: {selected_features['ordinal']}")
+    
+    return selected_features
 
-def prepare_features_for_knn(subjects_df, properties_df):
+def prepare_features_for_knn(subjects_df, properties_df, selected_features=None, missing_threshold=0.3):
     """
-    Prepare features for KNN candidate selection with proper imputation:
-    - Normalize numerical features
-    - One-hot encode categorical features
-    - Impute missing values
+    Prepare features for KNN with dynamic feature selection if needed.
+    
+    Args:
+        subjects_df: DataFrame containing subject properties
+        properties_df: DataFrame containing available properties
+        selected_features: Dictionary of pre-selected features (optional)
+        missing_threshold: Maximum acceptable proportion of missing values
+        
+    Returns:
+        Processed feature matrices and metadata
     """
+    # Dynamically select features if not provided
+    if selected_features is None:
+        selected_features = select_features_dynamically(
+            subjects_df, properties_df, missing_threshold
+        )
     
-    # Identify numerical and categorical columns for KNN
-    knn_numerical_cols = [
-        'gla', 'bedrooms', 'full_baths', 'half_baths', 
-        'year_built', 'room_count'
-    ]
+    # Combine all selected features
+    knn_features = (
+        selected_features['numeric'] + 
+        selected_features['categorical'] + 
+        selected_features['ordinal']
+    )
     
-    knn_categorical_cols = [
-        'structure_type', 'basement', 'cooling', 'heating'
-    ]
+    # Filter to features that exist in both dataframes
+    knn_features = [f for f in knn_features 
+                   if f in subjects_df.columns and f in properties_df.columns]
     
-    # Filter to columns that exist in both dataframes
-    knn_numerical_cols = [col for col in knn_numerical_cols 
-                         if col in subjects_df.columns and col in properties_df.columns]
-    knn_categorical_cols = [col for col in knn_categorical_cols 
-                           if col in subjects_df.columns and col in properties_df.columns]
+    # Split into numeric and categorical features
+    numeric_features = [f for f in knn_features 
+                       if pd.api.types.is_numeric_dtype(subjects_df[f])]
     
-    print(f"Using numerical features: {knn_numerical_cols}")
-    print(f"Using categorical features: {knn_categorical_cols}")
+    categorical_features = [f for f in knn_features 
+                           if not pd.api.types.is_numeric_dtype(subjects_df[f])]
     
     # Create preprocessing pipeline with imputation
     numeric_transformer = Pipeline(steps=[
@@ -927,229 +997,152 @@ def prepare_features_for_knn(subjects_df, properties_df):
     # Create column transformer for preprocessing
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', numeric_transformer, knn_numerical_cols),
-            ('cat', categorical_transformer, knn_categorical_cols)
+            ('num', numeric_transformer, numeric_features),
+            ('cat', categorical_transformer, categorical_features)
         ],
         remainder='drop'  # Drop other columns not specified
     )
     
-    # Create feature names for the transformed data
-    feature_names = knn_numerical_cols.copy()
-    
     # Fit the preprocessor on both subjects and properties
     combined_data = pd.concat([
-        subjects_df[knn_numerical_cols + knn_categorical_cols], 
-        properties_df[knn_numerical_cols + knn_categorical_cols]
+        subjects_df[knn_features], 
+        properties_df[knn_features]
     ], axis=0)
+    
     preprocessor.fit(combined_data)
     
-    # Get one-hot encoded feature names
-    cat_feature_names = []
-    if knn_categorical_cols:  # Only process if there are categorical columns
-        for i, col in enumerate(knn_categorical_cols):
-            encoder = preprocessor.transformers_[1][1].named_steps['onehot']
-            categories = encoder.categories_[i]
-            cat_feature_names.extend([f"{col}_{cat}" for cat in categories])
-    
-    all_feature_names = feature_names + cat_feature_names
-    
     # Transform the data
-    subjects_features = preprocessor.transform(subjects_df[knn_numerical_cols + knn_categorical_cols])
-    properties_features = preprocessor.transform(properties_df[knn_numerical_cols + knn_categorical_cols])
+    subjects_features = preprocessor.transform(subjects_df[knn_features])
+    properties_features = preprocessor.transform(properties_df[knn_features])
     
-    return subjects_features, properties_features, preprocessor, all_feature_names
-
-def scale_features_for_knn(subjects_df, properties_df, numerical_features):
-    """
-    Scale numerical features to 0-1 range for KNN
-    """
-    from sklearn.preprocessing import MinMaxScaler
-    
-    # Filter to features that exist in both dataframes
-    common_numerical_features = [f for f in numerical_features 
-                                if f in subjects_df.columns and f in properties_df.columns]
-    
-    if not common_numerical_features:
-        print("Warning: No common numerical features found between subjects and properties")
-        return subjects_df, properties_df, None
-    
-    # Initialize scaler
-    scaler = MinMaxScaler()
-    
-    # Combine data for fitting scaler
-    combined_data = pd.concat([
-        subjects_df[common_numerical_features],
-        properties_df[common_numerical_features]
-    ])
-    
-    # Fit scaler
-    scaler.fit(combined_data)
-    
-    # Transform data
-    subjects_scaled = subjects_df.copy()
-    properties_scaled = properties_df.copy()
-    
-    subjects_scaled[common_numerical_features] = scaler.transform(subjects_df[common_numerical_features])
-    properties_scaled[common_numerical_features] = scaler.transform(properties_df[common_numerical_features])
-    
-    return subjects_scaled, properties_scaled, scaler
-
-def encode_categorical_features(subjects_df, properties_df, categorical_features):
-    """
-    Encode categorical features for model input
-    """
-    from sklearn.preprocessing import OneHotEncoder
-    
-    # Initialize encoder
-    encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
-    
-    # Filter categorical features to only those that exist in both dataframes
-    common_categorical_features = [f for f in categorical_features 
-                                  if f in subjects_df.columns and f in properties_df.columns]
-    
-    if not common_categorical_features:
-        print("Warning: No common categorical features found between subjects and properties")
-        # Return the original dataframes if no common categorical features
-        return subjects_df, properties_df, None, []
-    
-    # Combine data for fitting encoder
-    combined_data = pd.concat([
-        subjects_df[common_categorical_features],
-        properties_df[common_categorical_features]
-    ])
-    
-    # Fit encoder
-    encoder.fit(combined_data)
-    
-    # Transform data
-    subjects_encoded = encoder.transform(subjects_df[common_categorical_features])
-    properties_encoded = encoder.transform(properties_df[common_categorical_features])
-    
-    # Get feature names
+    # Get feature names for interpretability
     feature_names = []
-    for i, feature in enumerate(common_categorical_features):
-        categories = encoder.categories_[i]
-        feature_names.extend([f"{feature}_{category}" for category in categories])
     
-    # Create DataFrames with encoded features
-    subjects_encoded_df = pd.DataFrame(subjects_encoded, columns=feature_names, index=subjects_df.index)
-    properties_encoded_df = pd.DataFrame(properties_encoded, columns=feature_names, index=properties_df.index)
+    # Add numeric feature names
+    if numeric_features:
+        feature_names.extend(numeric_features)
     
-    # Get numerical features that exist in both dataframes
-    subjects_numerical = [f for f in subjects_df.columns 
-                         if f not in common_categorical_features 
-                         and pd.api.types.is_numeric_dtype(subjects_df[f])]
+    # Add one-hot encoded feature names
+    if categorical_features:
+        cat_encoder = preprocessor.transformers_[1][1].named_steps['onehot']
+        for i, col in enumerate(categorical_features):
+            categories = cat_encoder.categories_[i]
+            feature_names.extend([f"{col}_{cat}" for cat in categories])
     
-    properties_numerical = [f for f in properties_df.columns 
-                           if f not in common_categorical_features 
-                           and pd.api.types.is_numeric_dtype(properties_df[f])]
-    
-    # Find common numerical features
-    common_numerical_features = [f for f in subjects_numerical if f in properties_numerical]
-    
-    # Combine numerical and encoded features
-    subjects_final = pd.concat([subjects_df[common_numerical_features], subjects_encoded_df], axis=1)
-    properties_final = pd.concat([properties_df[common_numerical_features], properties_encoded_df], axis=1)
-    
-    return subjects_final, properties_final, encoder, feature_names
+    return subjects_features, properties_features, preprocessor, feature_names, selected_features
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """
-    Calculate the distance between two geographical points using the Haversine formula.
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees)
+    using the Haversine formula.
     
-    Args:
-        lat1, lon1: Latitude and longitude of the first point
-        lat2, lon2: Latitude and longitude of the second point
-        
-    Returns:
-        Distance in kilometers
+    Returns distance in kilometers.
     """
-    from math import radians, cos, sin, asin, sqrt
-    
     # Convert decimal degrees to radians
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    lat1, lon1, lat2, lon2 = map(float, [lat1, lon1, lat2, lon2])
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     
     # Haversine formula
     dlon = lon2 - lon1
     dlat = lat2 - lat1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * asin(sqrt(a))
-    r = 6371  # Radius of earth in kilometers
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    radius = 6371  # Radius of earth in kilometers
     
-    return c * r
+    # Calculate the distance
+    distance = radius * c
+    
+    return distance
 
 def is_selected_comp(subject_row, candidate_row, comps_df):
     """
     Determine if a candidate property was selected as a comp for a subject property.
-    Uses only standardized address fields for comparison.
+    Uses standardized address fields for comparison.
+    
+    Args:
+        subject_row: Row from subjects_df containing subject property data
+        candidate_row: Row from properties_df containing candidate property data
+        comps_df: DataFrame containing all comp properties
+        
+    Returns:
+        Boolean indicating whether the candidate was selected as a comp
     """
-    # Match based on standardized address components
+    # Get standardized addresses
+    subject_address = subject_row['std_full_address'] or ''
+    candidate_address = candidate_row['std_full_address'] or ''
+    
+    # Check if this candidate appears in the comps dataframe for this subject
     matching_comps = comps_df[
-        # Match the subject property
-        (comps_df['subject_address'] == subject_row.get('std_full_address', '')) &
-        (
-            # Match on standardized address components
+        (comps_df['subject_address'] == subject_address) &
+        (comps_df['std_full_address'] == candidate_address)
+    ]
+    
+    # Alternative matching using street number, name, and city if needed
+    if matching_comps.empty and 'std_street_number' in comps_df.columns:
+        matching_comps = comps_df[
+            (comps_df['subject_address'] == subject_address) &
             (comps_df['std_street_number'] == candidate_row.get('std_street_number', '')) &
             (comps_df['std_street_name'] == candidate_row.get('std_street_name', '')) &
             (comps_df['std_city'] == candidate_row.get('std_city', ''))
-        )
-    ]
+        ]
     
     return not matching_comps.empty
 
-def create_similarity_features(subject_row, candidate_df, comps_df):
-    """Create similarity features between a subject property and candidate properties"""
+def create_similarity_features(subject_row, candidate_df, comps_df, selected_features=None):
+    """
+    Create similarity features between a subject property and candidate properties
+    
+    Args:
+        subject_row: Row from subjects_df containing subject property data
+        candidate_df: DataFrame containing candidate properties
+        comps_df: DataFrame containing all comp properties
+        selected_features: Dictionary of selected features by type
+        
+    Returns:
+        DataFrame with similarity features
+    """
     similarity_features = []
     
-    # Core features (low missing values)
-    core_features = ['gla', 'bedrooms', 'full_baths', 'structure_type']
-    
-    # Secondary features (more missing values, but still valuable)
-    secondary_features = [
-        'room_count', 'half_baths', 'year_built', 
-        'basement', 'cooling', 'heating'
-    ]
-    
-    # Geographical features
-    geo_features = ['latitude', 'longitude']
+    # Define feature sets if not provided
+    if selected_features is None:
+        numeric_features = ['gla', 'bedrooms', 'full_baths', 'half_baths', 'year_built', 'room_count']
+        categorical_features = ['structure_type', 'basement', 'cooling', 'heating']
+    else:
+        numeric_features = selected_features['numeric']
+        categorical_features = selected_features['categorical'] + selected_features['ordinal']
     
     for _, candidate_row in candidate_df.iterrows():
         features = {}
         
         # Add identifiers
-        features['subject_address'] = subject_row['std_full_address']
-        features['candidate_address'] = candidate_row['std_full_address']
+        features['subject_address'] = subject_row['std_full_address'] or ''
+        features['candidate_address'] = candidate_row['std_full_address'] or ''
+        features['subject_idx'] = subject_row.name
         
-        # Calculate core feature differences
-        for col in core_features:
+        # Calculate numerical differences/ratios
+        for col in numeric_features:
             if col in subject_row and col in candidate_row and not pd.isna(subject_row[col]) and not pd.isna(candidate_row[col]):
-                if isinstance(subject_row[col], (int, float)) and isinstance(candidate_row[col], (int, float)):
-                    # Numerical feature
-                    features[f'{col}_diff'] = abs(float(subject_row[col]) - float(candidate_row[col]))
-                    
-                    # Add ratio for key size metrics
-                    if col == 'gla' and float(subject_row[col]) > 0:
-                        features[f'{col}_ratio'] = float(candidate_row[col]) / float(subject_row[col])
-                else:
-                    # Categorical feature
-                    features[f'{col}_match'] = 1 if subject_row[col] == candidate_row[col] else 0
-        
-        # Calculate secondary feature differences (when available)
-        for col in secondary_features:
-            if col in subject_row and col in candidate_row and not pd.isna(subject_row[col]) and not pd.isna(candidate_row[col]):
-                if isinstance(subject_row[col], (int, float)) and isinstance(candidate_row[col], (int, float)):
-                    features[f'{col}_diff'] = abs(float(subject_row[col]) - float(candidate_row[col]))
-                else:
-                    features[f'{col}_match'] = 1 if subject_row[col] == candidate_row[col] else 0
+                # Absolute difference
+                features[f'{col}_diff'] = abs(float(subject_row[col]) - float(candidate_row[col]))
+                
+                # Ratio for size-related features
+                if col in ['gla', 'lot_size_sf'] and float(subject_row[col]) > 0:
+                    features[f'{col}_ratio'] = float(candidate_row[col]) / float(subject_row[col])
         
         # Calculate geographical distance if coordinates are available
-        if all(col in subject_row and col in candidate_row for col in geo_features):
+        if all(col in subject_row and col in candidate_row for col in ['latitude', 'longitude']):
             if not pd.isna(subject_row['latitude']) and not pd.isna(subject_row['longitude']) and \
                not pd.isna(candidate_row['latitude']) and not pd.isna(candidate_row['longitude']):
                 features['geo_distance'] = calculate_distance(
                     subject_row['latitude'], subject_row['longitude'],
                     candidate_row['latitude'], candidate_row['longitude']
                 )
+        
+        # Categorical matches
+        for col in categorical_features:
+            if col in subject_row and col in candidate_row:
+                features[f'{col}_match'] = 1 if subject_row[col] == candidate_row[col] else 0
         
         # Add label (1 if this candidate was selected as a comp, 0 otherwise)
         features['is_comp'] = 1 if is_selected_comp(subject_row, candidate_row, comps_df) else 0
@@ -1158,17 +1151,27 @@ def create_similarity_features(subject_row, candidate_df, comps_df):
     
     return pd.DataFrame(similarity_features)
 
-def build_property_recommendation_system(subjects_df, properties_df, comps_df):
+def build_property_recommendation_system(subjects_df, comps_df, properties_df, missing_threshold=0.3):
     """
-    Build the two-stage property recommendation system with proper handling of missing values
+    Build the two-stage property recommendation system with dynamic feature selection
+    
+    Args:
+        subjects_df: DataFrame containing subject properties
+        properties_df: DataFrame containing available properties
+        comps_df: DataFrame containing comp properties
+        missing_threshold: Maximum acceptable proportion of missing values
+        
+    Returns:
+        Dictionary containing trained models and metadata
     """
-    # 1. Prepare features for KNN using the new function with imputation
-    subjects_features, properties_features, knn_preprocessor, feature_names = prepare_features_for_knn(
-        subjects_df, properties_df
+    # 1. Dynamically select features and prepare for KNN
+    subjects_features, properties_features, knn_preprocessor, feature_names, selected_features = prepare_features_for_knn(
+        subjects_df, properties_df, missing_threshold=missing_threshold
     )
     
-    # 2. Build KNN model directly on the transformed features (now without NaN values)
-    knn_model = NearestNeighbors(n_neighbors=min(30, len(properties_features)), algorithm='auto')
+    # 2. Build KNN model
+    n_neighbors = min(30, len(properties_features))
+    knn_model = NearestNeighbors(n_neighbors=n_neighbors, algorithm='auto')
     knn_model.fit(properties_features)
     
     # 3. Generate candidates using KNN
@@ -1177,7 +1180,7 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
         distances, indices = knn_model.kneighbors([subject_row])
         candidates = properties_df.iloc[indices[0]].copy()
         candidates['subject_idx'] = i
-        candidates['subject_address'] = subjects_df.iloc[i]['address']
+        candidates['subject_address'] = subjects_df.iloc[i]['std_full_address'] or ''
         candidates['knn_distance'] = distances[0]
         candidates_by_subject.append(candidates)
     
@@ -1190,13 +1193,15 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
         subject_candidates = all_candidates[all_candidates['subject_idx'] == idx]
         
         # Create similarity features
-        similarity_df = create_similarity_features(subject_row, subject_candidates, comps_df)
+        similarity_df = create_similarity_features(
+            subject_row, subject_candidates, comps_df, None
+        )
         training_data.append(similarity_df)
     
     combined_training_data = pd.concat(training_data, ignore_index=True)
     
     # 5. Train LightGBM ranking model
-    X = combined_training_data.drop(['is_comp', 'subject_address', 'candidate_address'], axis=1)
+    X = combined_training_data.drop(['is_comp', 'subject_address', 'candidate_address', 'subject_idx'], axis=1)
     y = combined_training_data['is_comp']
     
     # Group by subject for ranking
@@ -1214,7 +1219,7 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
         'objective': 'lambdarank',
         'metric': 'ndcg',
         'ndcg_eval_at': [1, 3, 5],
-        'learning_rate': 0.1,
+        'learning_rate': 0.2,
         'num_leaves': 31,
         'min_data_in_leaf': 20,
         'feature_fraction': 0.8,
@@ -1223,12 +1228,28 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
     }
     
     # Train model
-    gbm = lgb.train(params, lgb_train, num_boost_round=100)
+    gbm = lgb.train(params, lgb_train, num_boost_round=500)
+    
+    # Get feature importance
+    feature_importance = dict(zip(X.columns, 
+                                  gbm.feature_importance(importance_type='gain')))
+    
+    # Sort features by importance
+    sorted_features = sorted(
+        feature_importance.items(), 
+        key=lambda x: x[1], 
+        reverse=True
+    )
+    
+    print("\nTop 10 most important features:")
+    for feature, importance in sorted_features[:10]:
+        print(f"{feature}: {importance}")
     
     return {
         'knn_model': knn_model,
         'knn_preprocessor': knn_preprocessor,
         'knn_feature_names': feature_names,
         'lgb_model': gbm,
-        'feature_importance': dict(zip(X.columns, gbm.feature_importance()))
+        'feature_importance': feature_importance,
+        'selected_features': selected_features
     }
