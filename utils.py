@@ -41,6 +41,195 @@ def extract_street_components(address_str):
     
     return unit_number, street_number, street_name
 
+def standardize_street_type(street_name):
+    """Standardize common street type abbreviations"""
+    street_type_map = {
+        'avenue': 'Ave',
+        'boulevard': 'Blvd',
+        'circle': 'Cir',
+        'court': 'Ct',
+        'crescent': 'Cres',
+        'drive': 'Dr',
+        'expressway': 'Expy',
+        'freeway': 'Fwy',
+        'highway': 'Hwy',
+        'lane': 'Ln',
+        'parkway': 'Pkwy',
+        'place': 'Pl',
+        'road': 'Rd',
+        'square': 'Sq',
+        'street': 'St',
+        'terrace': 'Ter',
+        'trail': 'Trl',
+        'way': 'Way'
+    }
+    
+    if not street_name:
+        return street_name
+        
+    # Split into words
+    words = street_name.split()
+    if not words:
+        return street_name
+        
+    # Check if the last word is a street type that should be standardized
+    last_word = words[-1].lower()
+    if last_word in street_type_map:
+        words[-1] = street_type_map[last_word]
+        
+    return ' '.join(words)
+
+def extract_complex_address_components(address_str):
+    """
+    Extract components from complex address formats including various unit formats.
+    Returns unit_number, street_number, street_name
+    """
+    if not address_str:
+        return None, None, None
+        
+    # Clean the address string
+    address_str = address_str.strip()
+    
+    # Handle "Unit X - Y" format
+    unit_pattern = re.compile(r'^(?:Unit|UNIT|Apt\.?|APT\.?|#)\s*([A-Za-z0-9-]+)\s*[-:]\s*(\d+.*)$')
+    unit_match = unit_pattern.match(address_str)
+    
+    if unit_match:
+        unit_number = unit_match.group(1)
+        remaining = unit_match.group(2)
+        
+        # Extract street number and name from remaining part
+        components = remaining.split(maxsplit=1)
+        if len(components) >= 2:
+            street_number = components[0]
+            street_name = components[1]
+        else:
+            street_number = remaining
+            street_name = ""
+            
+        return unit_number, street_number, street_name
+    
+    # Handle "X-Y Street" format (like 210-40 Regency Park Dr)
+    complex_pattern = re.compile(r'^(\d+)[-:](\d+)\s+(.+)$')
+    complex_match = complex_pattern.match(address_str)
+    
+    if complex_match:
+        unit_number = complex_match.group(1)
+        street_number = complex_match.group(2)
+        street_name = complex_match.group(3)
+        return unit_number, street_number, street_name
+    
+    # Handle standard "X Street" format
+    standard_pattern = re.compile(r'^(\d+(?:\s+[A-Za-z0-9]+)?)\s+(.+)$')
+    standard_match = standard_pattern.match(address_str)
+    
+    if standard_match:
+        street_number = standard_match.group(1)
+        street_name = standard_match.group(2)
+        return None, street_number, street_name
+    
+    # If no patterns match, return the whole string as street_name
+    return None, None, address_str
+
+def standardize_street_type(street_name):
+    """Standardize common street type abbreviations"""
+    street_type_map = {
+        'avenue': 'Ave',
+        'boulevard': 'Blvd',
+        'circle': 'Cir',
+        'court': 'Ct',
+        'crescent': 'Cres',
+        'drive': 'Dr',
+        'expressway': 'Expy',
+        'freeway': 'Fwy',
+        'highway': 'Hwy',
+        'lane': 'Ln',
+        'parkway': 'Pkwy',
+        'place': 'Pl',
+        'road': 'Rd',
+        'square': 'Sq',
+        'street': 'St',
+        'terrace': 'Ter',
+        'trail': 'Trl',
+        'way': 'Way'
+    }
+    
+    if not street_name:
+        return street_name
+        
+    # Split into words
+    words = street_name.split()
+    if not words:
+        return street_name
+        
+    # Check if the last word is a street type that should be standardized
+    last_word = words[-1].lower()
+    if last_word in street_type_map:
+        words[-1] = street_type_map[last_word]
+        
+    return ' '.join(words)
+
+def parse_address(address_str):
+    """
+    Parse address string into components.
+    Returns unit_number, street_number, street_name
+    """
+    if not address_str:
+        return None, None, None
+    
+    # Clean the address string
+    address_str = address_str.strip()
+    
+    # Case 1: Unit X - Y Street Name format
+    unit_prefix_pattern = re.compile(r'^(?:Unit|UNIT|Apt\.?|APT\.?|#)\s*(\w+)\s*[-:]\s*(\d+)\s+(.+)$', re.IGNORECASE)
+    match = unit_prefix_pattern.match(address_str)
+    if match:
+        unit_number = match.group(1)
+        street_number = match.group(2)
+        street_name = match.group(3)
+        return unit_number, street_number, street_name
+    
+    # Case 2: X-Y Street Name format (unit-street number)
+    unit_street_pattern = re.compile(r'^(\d+)[-:]\s*(\d+)\s+(.+)$')
+    match = unit_street_pattern.match(address_str)
+    if match:
+        unit_number = match.group(1)
+        street_number = match.group(2)
+        street_name = match.group(3)
+        return unit_number, street_number, street_name
+    
+    # Case 3: Standard street address with number
+    # Look for the first number followed by the rest of the address
+    standard_pattern = re.compile(r'^(\d+(?:\s*-\s*\d+)?)\s+(.+)$')
+    match = standard_pattern.match(address_str)
+    if match:
+        street_number = match.group(1).strip()
+        street_name = match.group(2).strip()
+        return None, street_number, street_name
+    
+    # If no patterns match, return the whole string as street_name
+    return None, None, address_str
+
+def normalize_address_components(unit_number, street_number, street_name):
+    """
+    Normalize address components by handling special cases and standardizing formats.
+    """
+    # Standardize unit number format
+    if unit_number:
+        unit_number = unit_number.strip()
+    
+    # Standardize street number format
+    if street_number:
+        street_number = street_number.strip()
+    
+    # Standardize street name and handle multi-word street names
+    if street_name:
+        street_name = street_name.strip()
+        # Standardize street type abbreviations
+        street_name = standardize_street_type(street_name)
+    
+    return unit_number, street_number, street_name
+
 # Process different address types
 def process_subject_address(subject_data):
     """Process subject property address"""
@@ -193,8 +382,9 @@ def process_property_address(property_data):
     if province in province_map:
         province = province_map[province]
     
-    # Extract street components
-    unit_number, street_number, street_name = extract_street_components(address)
+    # Parse and normalize address components
+    unit_number, street_number, street_name = parse_address(address)
+    unit_number, street_number, street_name = normalize_address_components(unit_number, street_number, street_name)
     
     # Create standardized address dictionary
     standardized = {
@@ -219,9 +409,10 @@ def process_property_address(property_data):
     if province:
         std_parts.append(province)
     if postal_code:
-        std_parts.append(postal_code)
+        std_parts.append(standardize_postal_code(postal_code))
     
     standardized['std_full_address'] = ', '.join(std_parts)
+    
     return standardized
 
 # Data cleaning functions
