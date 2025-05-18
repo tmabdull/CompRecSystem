@@ -850,9 +850,10 @@ def handle_duplicates(subjects_df, comps_df, properties_df):
 # Model
 import pandas as pd
 import numpy as np
-# from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-# from sklearn.compose import ColumnTransformer
-# from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.pipeline import Pipeline
 from sklearn.neighbors import NearestNeighbors
 import lightgbm as lgb
 
@@ -885,44 +886,78 @@ def select_features_for_knn(subjects_df, properties_df):
     print(f"Selected KNN features: {available_features}")
     return available_features
 
-def prepare_features(subjects_df, properties_df, selected_features):
+def prepare_features_for_knn(subjects_df, properties_df):
     """
-    Prepare features for model training with appropriate handling of missing values
+    Prepare features for KNN candidate selection with proper imputation:
+    - Normalize numerical features
+    - One-hot encode categorical features
+    - Impute missing values
     """
-    # Create copies to avoid modifying original data
-    subjects_copy = subjects_df.copy()
-    properties_copy = properties_df.copy()
     
-    # For numerical features, impute missing values with median
-    numerical_features = [f for f in selected_features 
-                         if f in subjects_df.columns and 
-                         pd.api.types.is_numeric_dtype(subjects_df[f])]
+    # Identify numerical and categorical columns for KNN
+    knn_numerical_cols = [
+        'gla', 'bedrooms', 'full_baths', 'half_baths', 
+        'year_built', 'room_count'
+    ]
     
-    for feature in numerical_features:
-        # Calculate median from combined data
-        combined_values = pd.concat([subjects_df[feature], properties_df[feature]]).dropna()
-        median_value = combined_values.median()
-        
-        # Impute missing values
-        subjects_copy[feature] = subjects_copy[feature].fillna(median_value)
-        properties_copy[feature] = properties_copy[feature].fillna(median_value)
+    knn_categorical_cols = [
+        'structure_type', 'basement', 'cooling', 'heating'
+    ]
     
-    # For categorical features, impute with most frequent value
-    categorical_features = [f for f in selected_features 
-                           if f in subjects_df.columns and 
-                           pd.api.types.is_categorical_dtype(subjects_df[f])]
+    # Filter to columns that exist in both dataframes
+    knn_numerical_cols = [col for col in knn_numerical_cols 
+                         if col in subjects_df.columns and col in properties_df.columns]
+    knn_categorical_cols = [col for col in knn_categorical_cols 
+                           if col in subjects_df.columns and col in properties_df.columns]
     
-    for feature in categorical_features:
-        # Calculate most frequent value
-        combined_values = pd.concat([subjects_df[feature], properties_df[feature]]).dropna()
-        mode_value = combined_values.mode()[0] if not combined_values.empty else None
-        
-        # Impute missing values
-        if mode_value is not None:
-            subjects_copy[feature] = subjects_copy[feature].fillna(mode_value)
-            properties_copy[feature] = properties_copy[feature].fillna(mode_value)
+    print(f"Using numerical features: {knn_numerical_cols}")
+    print(f"Using categorical features: {knn_categorical_cols}")
     
-    return subjects_copy, properties_copy
+    # Create preprocessing pipeline with imputation
+    numeric_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', MinMaxScaler())
+    ])
+    
+    categorical_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    # Create column transformer for preprocessing
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', numeric_transformer, knn_numerical_cols),
+            ('cat', categorical_transformer, knn_categorical_cols)
+        ],
+        remainder='drop'  # Drop other columns not specified
+    )
+    
+    # Create feature names for the transformed data
+    feature_names = knn_numerical_cols.copy()
+    
+    # Fit the preprocessor on both subjects and properties
+    combined_data = pd.concat([
+        subjects_df[knn_numerical_cols + knn_categorical_cols], 
+        properties_df[knn_numerical_cols + knn_categorical_cols]
+    ], axis=0)
+    preprocessor.fit(combined_data)
+    
+    # Get one-hot encoded feature names
+    cat_feature_names = []
+    if knn_categorical_cols:  # Only process if there are categorical columns
+        for i, col in enumerate(knn_categorical_cols):
+            encoder = preprocessor.transformers_[1][1].named_steps['onehot']
+            categories = encoder.categories_[i]
+            cat_feature_names.extend([f"{col}_{cat}" for cat in categories])
+    
+    all_feature_names = feature_names + cat_feature_names
+    
+    # Transform the data
+    subjects_features = preprocessor.transform(subjects_df[knn_numerical_cols + knn_categorical_cols])
+    properties_features = preprocessor.transform(properties_df[knn_numerical_cols + knn_categorical_cols])
+    
+    return subjects_features, properties_features, preprocessor, all_feature_names
 
 def scale_features_for_knn(subjects_df, properties_df, numerical_features):
     """
@@ -930,13 +965,21 @@ def scale_features_for_knn(subjects_df, properties_df, numerical_features):
     """
     from sklearn.preprocessing import MinMaxScaler
     
+    # Filter to features that exist in both dataframes
+    common_numerical_features = [f for f in numerical_features 
+                                if f in subjects_df.columns and f in properties_df.columns]
+    
+    if not common_numerical_features:
+        print("Warning: No common numerical features found between subjects and properties")
+        return subjects_df, properties_df, None
+    
     # Initialize scaler
     scaler = MinMaxScaler()
     
     # Combine data for fitting scaler
     combined_data = pd.concat([
-        subjects_df[numerical_features],
-        properties_df[numerical_features]
+        subjects_df[common_numerical_features],
+        properties_df[common_numerical_features]
     ])
     
     # Fit scaler
@@ -946,8 +989,8 @@ def scale_features_for_knn(subjects_df, properties_df, numerical_features):
     subjects_scaled = subjects_df.copy()
     properties_scaled = properties_df.copy()
     
-    subjects_scaled[numerical_features] = scaler.transform(subjects_df[numerical_features])
-    properties_scaled[numerical_features] = scaler.transform(properties_df[numerical_features])
+    subjects_scaled[common_numerical_features] = scaler.transform(subjects_df[common_numerical_features])
+    properties_scaled[common_numerical_features] = scaler.transform(properties_df[common_numerical_features])
     
     return subjects_scaled, properties_scaled, scaler
 
@@ -960,22 +1003,31 @@ def encode_categorical_features(subjects_df, properties_df, categorical_features
     # Initialize encoder
     encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
     
+    # Filter categorical features to only those that exist in both dataframes
+    common_categorical_features = [f for f in categorical_features 
+                                  if f in subjects_df.columns and f in properties_df.columns]
+    
+    if not common_categorical_features:
+        print("Warning: No common categorical features found between subjects and properties")
+        # Return the original dataframes if no common categorical features
+        return subjects_df, properties_df, None, []
+    
     # Combine data for fitting encoder
     combined_data = pd.concat([
-        subjects_df[categorical_features],
-        properties_df[categorical_features]
+        subjects_df[common_categorical_features],
+        properties_df[common_categorical_features]
     ])
     
     # Fit encoder
     encoder.fit(combined_data)
     
     # Transform data
-    subjects_encoded = encoder.transform(subjects_df[categorical_features])
-    properties_encoded = encoder.transform(properties_df[categorical_features])
+    subjects_encoded = encoder.transform(subjects_df[common_categorical_features])
+    properties_encoded = encoder.transform(properties_df[common_categorical_features])
     
     # Get feature names
     feature_names = []
-    for i, feature in enumerate(categorical_features):
+    for i, feature in enumerate(common_categorical_features):
         categories = encoder.categories_[i]
         feature_names.extend([f"{feature}_{category}" for category in categories])
     
@@ -983,11 +1035,21 @@ def encode_categorical_features(subjects_df, properties_df, categorical_features
     subjects_encoded_df = pd.DataFrame(subjects_encoded, columns=feature_names, index=subjects_df.index)
     properties_encoded_df = pd.DataFrame(properties_encoded, columns=feature_names, index=properties_df.index)
     
-    # Combine with original numerical features
-    numerical_features = [f for f in subjects_df.columns if f not in categorical_features and pd.api.types.is_numeric_dtype(subjects_df[f])]
+    # Get numerical features that exist in both dataframes
+    subjects_numerical = [f for f in subjects_df.columns 
+                         if f not in common_categorical_features 
+                         and pd.api.types.is_numeric_dtype(subjects_df[f])]
     
-    subjects_final = pd.concat([subjects_df[numerical_features], subjects_encoded_df], axis=1)
-    properties_final = pd.concat([properties_df[numerical_features], properties_encoded_df], axis=1)
+    properties_numerical = [f for f in properties_df.columns 
+                           if f not in common_categorical_features 
+                           and pd.api.types.is_numeric_dtype(properties_df[f])]
+    
+    # Find common numerical features
+    common_numerical_features = [f for f in subjects_numerical if f in properties_numerical]
+    
+    # Combine numerical and encoded features
+    subjects_final = pd.concat([subjects_df[common_numerical_features], subjects_encoded_df], axis=1)
+    properties_final = pd.concat([properties_df[common_numerical_features], properties_encoded_df], axis=1)
     
     return subjects_final, properties_final, encoder, feature_names
 
@@ -1098,44 +1160,30 @@ def create_similarity_features(subject_row, candidate_df, comps_df):
 
 def build_property_recommendation_system(subjects_df, properties_df, comps_df):
     """
-    Build the two-stage property recommendation system with appropriate handling of missing values
+    Build the two-stage property recommendation system with proper handling of missing values
     """
-    # 1. Select features based on missing value analysis
-    knn_features = select_features_for_knn(subjects_df, properties_df)
-    
-    # 2. Handle missing values
-    subjects_processed, properties_processed = prepare_features(subjects_df, properties_df, knn_features)
-    
-    # 3. Split features into numerical and categorical
-    numerical_features = [f for f in knn_features if pd.api.types.is_numeric_dtype(subjects_processed[f])]
-    categorical_features = [f for f in knn_features if pd.api.types.is_categorical_dtype(subjects_processed[f])]
-    
-    # 4. Scale numerical features
-    subjects_scaled, properties_scaled, scaler = scale_features_for_knn(
-        subjects_processed, properties_processed, numerical_features
+    # 1. Prepare features for KNN using the new function with imputation
+    subjects_features, properties_features, knn_preprocessor, feature_names = prepare_features_for_knn(
+        subjects_df, properties_df
     )
     
-    # 5. Encode categorical features
-    subjects_final, properties_final, encoder, encoded_feature_names = encode_categorical_features(
-        subjects_scaled, properties_scaled, categorical_features
-    )
+    # 2. Build KNN model directly on the transformed features (now without NaN values)
+    knn_model = NearestNeighbors(n_neighbors=min(30, len(properties_features)), algorithm='auto')
+    knn_model.fit(properties_features)
     
-    # 6. Build KNN model
-    knn_model = NearestNeighbors(n_neighbors=min(30, len(properties_final)), algorithm='auto')
-    knn_model.fit(properties_final)
-    
-    # 7. Generate candidates using KNN
+    # 3. Generate candidates using KNN
     candidates_by_subject = []
-    for idx, subject_row in subjects_final.iterrows():
+    for i, subject_row in enumerate(subjects_features):
         distances, indices = knn_model.kneighbors([subject_row])
         candidates = properties_df.iloc[indices[0]].copy()
-        candidates['subject_idx'] = idx
+        candidates['subject_idx'] = i
+        candidates['subject_address'] = subjects_df.iloc[i]['address']
         candidates['knn_distance'] = distances[0]
         candidates_by_subject.append(candidates)
     
     all_candidates = pd.concat(candidates_by_subject, ignore_index=True)
     
-    # 8. Create similarity features for LightGBM
+    # 4. Create similarity features for LightGBM
     training_data = []
     for idx, subject_row in subjects_df.iterrows():
         # Get candidates for this subject
@@ -1147,7 +1195,7 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
     
     combined_training_data = pd.concat(training_data, ignore_index=True)
     
-    # 9. Train LightGBM ranking model
+    # 5. Train LightGBM ranking model
     X = combined_training_data.drop(['is_comp', 'subject_address', 'candidate_address'], axis=1)
     y = combined_training_data['is_comp']
     
@@ -1158,6 +1206,7 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
     X = X.fillna(X.mean())
     
     # Create LightGBM dataset
+    import lightgbm as lgb
     lgb_train = lgb.Dataset(X, y, group=groups)
     
     # Set parameters
@@ -1178,9 +1227,8 @@ def build_property_recommendation_system(subjects_df, properties_df, comps_df):
     
     return {
         'knn_model': knn_model,
-        'knn_scaler': scaler,
-        'knn_encoder': encoder,
-        'knn_features': knn_features,
+        'knn_preprocessor': knn_preprocessor,
+        'knn_feature_names': feature_names,
         'lgb_model': gbm,
         'feature_importance': dict(zip(X.columns, gbm.feature_importance()))
     }
