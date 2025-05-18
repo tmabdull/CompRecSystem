@@ -256,32 +256,54 @@ def process_subject_address(subject_data):
     city_province_zip = subject_data.get('subject_city_province_zip', '') or ''
     
     # Clean the strings
-    full_address = full_address.replace(',', ' ').strip()
-    city_province_zip = city_province_zip.replace(',', ' ').strip().replace('"', '').strip()
+    full_address = full_address.strip()
+    city_province_zip = city_province_zip.replace('"', '').strip()
     
-    # Extract city, province, postal code from subject_city_province_zip
-    parts = city_province_zip.split()
-    if len(parts) >= 3:
-        # Last element is likely postal code
-        postal_code = parts[-1]
-        # Second-to-last is likely province
-        province = parts[-2]
+    # Extract postal code from city_province_zip
+    postal_code = None
+    postal_match = re.search(r'([A-Za-z]\d[A-Za-z])\s*(\d[A-Za-z]\d)', city_province_zip)
+    if postal_match:
+        postal_code = f"{postal_match.group(1)} {postal_match.group(2)}"
+        # Remove postal code from the string
+        city_province_zip = city_province_zip[:postal_match.start()].strip().rstrip(',')
+    
+    # Now split the remaining city_province_zip to get city and province
+    city_province_parts = city_province_zip.split()
+    
+    # Default values
+    city = city_province_zip
+    province = None
+    
+    # If we have at least two parts, assume the last part is the province
+    if len(city_province_parts) >= 2:
+        # Last element is likely province
+        province = city_province_parts[-1]
+
+        if province in province_map:
+            province = province_map[province]
+
         # Everything else is city
-        city = ' '.join(parts[:-2])
-    else:
-        city = city_province_zip
-        province = None
-        postal_code = None
+        city = ' '.join(city_province_parts[:-1])
     
-    # Remove city_province_zip from full_address if it appears at the end
+    # Extract street address by removing city from full_address
     street_address = full_address
-    if city and city in street_address:
-        street_address = street_address[:street_address.find(city)].strip()
     
-    # Extract street components
-    unit_number, street_number, street_name = extract_street_components(street_address)
+    # If we have a city, try to find it in the full address and remove everything from that point
+    if city and len(city) > 2:  # Avoid very short city names that might cause false matches
+        city_pos = -1
+        # Try to find the city in the address
+        if city.lower() in full_address.lower():
+            city_pos = full_address.lower().find(city.lower())
+        
+        # If city is found in the address, remove it and everything after
+        if city_pos > 0:
+            street_address = full_address[:city_pos].strip()
     
-    # Create standardized address dictionary
+    # Parse and normalize address components using our helper functions
+    unit_number, street_number, street_name = parse_address(street_address)
+    unit_number, street_number, street_name = normalize_address_components(unit_number, street_number, street_name)
+    
+    # Create standardized address dictionary with std_ prefix
     standardized = {
         'std_unit_number': unit_number,
         'std_street_number': street_number,
@@ -304,9 +326,10 @@ def process_subject_address(subject_data):
     if province:
         std_parts.append(province)
     if postal_code:
-        std_parts.append(postal_code)
+        std_parts.append(standardize_postal_code(postal_code))
     
     standardized['std_full_address'] = ', '.join(std_parts)
+    
     return standardized
 
 def process_comp_address(comp_data):
