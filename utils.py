@@ -5,6 +5,24 @@ import numpy as np
 import json
 from IPython.display import display, HTML
 
+# Standardize province (convert full name to abbreviation)
+province_map = {
+    'Alberta': 'AB',
+    'British Columbia': 'BC',
+    'Manitoba': 'MB',
+    'New Brunswick': 'NB',
+    'Newfoundland': 'NL',
+    'Newfoundland And Labrador': 'NL',
+    'Northwest Territories': 'NT',
+    'Nova Scotia': 'NS',
+    'Nunavut': 'NU',
+    'Ontario': 'ON',
+    'Prince Edward Island': 'PE',
+    'Quebec': 'QC',
+    'Saskatchewan': 'SK',
+    'Yukon': 'YT'
+}
+
 # Address parsing functions
 def standardize_postal_code(postal_code):
     """Standardize postal code format"""
@@ -295,30 +313,52 @@ def process_comp_address(comp_data):
     """Process comp property address"""
     # Get the raw address strings
     address = comp_data.get('address', '') or ''
-    city_province = comp_data.get('city_province', '') or ''
+    city_province_postal = comp_data.get('city_province', '') or ''
     
     # Clean the strings
-    address = address.replace(',', ' ').strip()
-    city_province = city_province.replace(',', ' ').strip()
+    address.strip()
+    city_province_postal.strip()
     
-    # Extract city, province, postal code from city_province
-    parts = city_province.split()
-    if len(parts) >= 3:
-        # Last element is likely postal code
-        postal_code = parts[-1]
-        # Second-to-last is likely province
-        province = parts[-2]
-        # Everything else is city
-        city = ' '.join(parts[:-2])
-    else:
-        city = city_province
-        province = None
-        postal_code = None
+    # Parse the address components using our improved helper function
+    unit_number, street_number, street_name = parse_address(address)
+    unit_number, street_number, street_name = normalize_address_components(unit_number, street_number, street_name)
     
-    # Extract street components from address
-    unit_number, street_number, street_name = extract_street_components(address)
+    # Parse city_province_postal which may contain all three components
+    # Look for postal code pattern at the end
+    postal_code = None
+    province = None
+    city = city_province_postal
     
-    # Create standardized address dictionary
+    # Try to extract postal code (Canadian format: A1A 1A1 or A1A1A1)
+    postal_match = re.search(r'([A-Za-z]\d[A-Za-z])\s*(\d[A-Za-z]\d)$', city_province_postal)
+    if postal_match:
+        postal_code = f"{postal_match.group(1)} {postal_match.group(2)}"
+        # Remove postal code from the string
+        city = city_province_postal[:postal_match.start()].strip()
+    
+    # Now try to extract province (typically 2 letters before postal code)
+    province_match = re.search(r'\b([A-Z]{2})\b', city)
+    if province_match:
+        province = province_match.group(1)
+        # Split by the province to get the city
+        parts = city.split(province)
+        if len(parts) >= 2:
+            city = parts[0].strip().rstrip(',')
+            # If there's content after the province and it's not the postal code
+            # (which we've already extracted), it might be part of the city
+            if parts[1].strip() and not re.match(r'^\s*[A-Z]\d[A-Z]\s*\d[A-Z]\d', parts[1]):
+                city += " " + parts[1].strip()
+    
+    # Handle special case where city contains "Alberta" instead of "AB"
+    if "Alberta" in city and not province:
+        city = city.replace("Alberta", "").strip().rstrip(',')
+        province = "AB"
+    
+    # If province is a full name, convert to abbreviation
+    if province in province_map:
+        province = province_map[province]
+    
+    # Create standardized address dictionary with std_ prefix
     standardized = {
         'std_unit_number': unit_number,
         'std_street_number': street_number,
@@ -341,9 +381,10 @@ def process_comp_address(comp_data):
     if province:
         std_parts.append(province)
     if postal_code:
-        std_parts.append(postal_code)
+        std_parts.append(standardize_postal_code(postal_code))
     
     standardized['std_full_address'] = ', '.join(std_parts)
+    
     return standardized
 
 def process_property_address(property_data):
@@ -359,24 +400,6 @@ def process_property_address(property_data):
     city = city.strip()
     province = province.strip()
     postal_code = postal_code.strip()
-    
-    # Standardize province (convert full name to abbreviation)
-    province_map = {
-        'Alberta': 'AB',
-        'British Columbia': 'BC',
-        'Manitoba': 'MB',
-        'New Brunswick': 'NB',
-        'Newfoundland': 'NL',
-        'Newfoundland And Labrador': 'NL',
-        'Northwest Territories': 'NT',
-        'Nova Scotia': 'NS',
-        'Nunavut': 'NU',
-        'Ontario': 'ON',
-        'Prince Edward Island': 'PE',
-        'Quebec': 'QC',
-        'Saskatchewan': 'SK',
-        'Yukon': 'YT'
-    }
     
     # If province is a full name, convert to abbreviation
     if province in province_map:
