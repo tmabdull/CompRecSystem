@@ -629,14 +629,31 @@ def apply_specific_processing(subjects_df, comps_df, properties_df):
     return subjects_df, comps_df, properties_df
 
 # Data type conversion function
+# Define exclusion lists for model training
 EXCLUDED_FEATURES_PREPROCESS = set([
+    # Original address fields (replaced with standardized versions)
     'address', 'subject_city_province_zip', 'city_province', 'city', 'province', 'postal_code',
+    
+    # Fields we decided to exclude earlier
     "site_dimensions", "units_sq_ft", 
     "lot_size", "lot_size_sf",
     "water_heater", "exterior_finish", 
     "style", "levels",
     "effective_age", "subject_age", "age",
+    
+    # Date fields
     "effective_date", "close_date", "sale_date",
+    
+    # Ordinal fields
+    'condition', 'condition_relative', 'location_similarity',
+    
+    # Categorical fields
+    'prop_type', 'stories', 'basement_finish', 'parking', 'neighborhood', 'roof',
+    'roofing', 'construction', 'windows', 'basement', 'foundation_walls', 
+    'flooring', 'plumbing_lines', 'heating', 'cooling', 'fuel_type', 
+    'water_heater', 'property_sub_type', 'structure_type',
+    
+    # Text fields
     "public_remarks"
 ])
 
@@ -702,17 +719,24 @@ def convert_column_types(df, mapping_df, section_name):
             elif dtype == 'date':
                 df[col] = pd.to_datetime(df[col], errors='coerce')
             elif dtype == 'categorical':
-                df[col] = df[col].astype('category')
+                # First convert to object type and handle NaN values
+                df[col] = df[col].astype(object)
+                # Replace 'nan' strings with actual NaN
+                df[col] = df[col].replace('nan', np.nan)
+
+                # # Then convert to category
+                # df[col] = pd.Categorical(df[col])
+
+                # Then convert non-null values to category
+                mask = df[col].notna()
+                if mask.any():
+                    df.loc[mask, col] = df.loc[mask, col].astype('category')
             elif dtype == 'ordinal':
                 # Handle ordinal fields based on section and field name
                 # Creating a new numeric version of each ordinal col
-                #   Categorical (original) + numerical can be used by LightGBM
-                #   Numerical will be used by KNN
 
                 if section_name == 'subject' and col in ORDINAL_FEATURES:
                     # For subject condition (absolute rating)
-
-                    # Numerical (new col)
                     condition_map = {
                         'Poor': 1,
                         'Fair': 2,
@@ -720,10 +744,11 @@ def convert_column_types(df, mapping_df, section_name):
                         'Good': 4,
                         'Excellent': 5
                     }
-                    df[f'{col}_score'] = df[col].map(condition_map)
+                    df[f'{col}_score'] = df[col].map(condition_map) # Numerical (new col)
 
                     # Original col will be made categorical
                     condition_order = list(condition_map.keys())
+                    df[col] = df[col].astype(str).replace('nan', np.nan)
                     df[col] = pd.Categorical(df[col], categories=condition_order, ordered=True)
 
                 elif section_name == 'comps' and col in ORDINAL_FEATURES:
@@ -733,10 +758,11 @@ def convert_column_types(df, mapping_df, section_name):
                         'Similar': 2,
                         'Superior': 3
                     }
-                    df[f'{col}_score'] = df[col].map(comparison_map)
+                    df[f'{col}_score'] = df[col].map(comparison_map) # Numerical (new col)
 
                     # Original col will be made categorical
                     comparison_order = list(comparison_map.keys())
+                    df[col] = df[col].astype(str).replace('nan', np.nan)
                     df[col] = pd.Categorical(df[col], categories=comparison_order, ordered=True)
 
             elif dtype == 'string':
@@ -765,12 +791,20 @@ def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", m
     
     # Process each appraisal
     for appraisal in raw_data.get('appraisals', []):
+        # Store the standardized subject address for use with comps and properties
+        subject_std_full_address = None # will be updated in the 'subject' if block
+
         # Process subject property
         if 'subject' in appraisal:
             subject_data = appraisal['subject'].copy()
             # Add standardized address
             subject_data.update(process_subject_address(subject_data))
             subjects.append(subject_data)
+            
+            # Update the standardized address (with fallback to original if needed)
+            subject_std_full_address = subject_data.get('std_full_address')
+            if not subject_std_full_address and 'address' in subject_data:
+                subject_std_full_address = subject_data['address']
         
         # Process comp properties
         if 'comps' in appraisal:
@@ -780,7 +814,7 @@ def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", m
                 comp_data.update(process_comp_address(comp_data))
                 # Add reference to subject property
                 if 'subject' in appraisal and 'address' in appraisal['subject']:
-                    comp_data['subject_address'] = appraisal['subject']['address']
+                    comp_data['subject_address'] = subject_std_full_address
                 comps.append(comp_data)
         
         # Process available properties
@@ -791,7 +825,7 @@ def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", m
                 prop_data.update(process_property_address(prop_data))
                 # Add reference to subject property
                 if 'subject' in appraisal and 'address' in appraisal['subject']:
-                    prop_data['subject_address'] = appraisal['subject']['address']
+                    prop_data['subject_address'] = subject_std_full_address
                 properties.append(prop_data)
     
     # Convert to DataFrames
@@ -1253,3 +1287,321 @@ def build_property_recommendation_system(subjects_df, comps_df, properties_df, m
         'feature_importance': feature_importance,
         'selected_features': selected_features
     }
+
+# XGBoost Model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+import xgboost as xgb
+from sklearn.metrics import mean_squared_error, accuracy_score, precision_score, recall_score, f1_score
+
+# Add standardized address components to exclusion list
+address_components = set([
+    'std_unit_number', 'std_street_number', 'std_street_name', 
+    'std_city', 'std_province', 'std_postal_code'
+])
+
+MODEL_EXCLUSION_LIST = EXCLUDED_FEATURES_PREPROCESS.union(address_components)
+
+def normalize_numerical_features(df):
+    """
+    Normalize numerical features to 0-1 range
+    Returns the scaler and the normalized dataframe
+    """
+    # Select only numeric columns
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    
+    if not numeric_cols:
+        print("Warning: No numeric columns found for normalization")
+        return None, df
+    
+    # Initialize scaler
+    scaler = MinMaxScaler()
+    
+    # Create a copy of the dataframe to avoid modifying the original
+    df_normalized = df.copy()
+    
+    # Apply scaling to numeric columns
+    df_normalized[numeric_cols] = scaler.fit_transform(df[numeric_cols].fillna(df[numeric_cols].median()))
+    
+    return scaler, df_normalized
+
+def create_feature_interactions(df):
+    """
+    Create simple interactions between important numerical features
+    """
+    # List of important features that might have meaningful interactions
+    important_features = ['gla', 'room_count', 'bedrooms', 'full_baths', 'half_baths']
+    
+    # Only use features that exist in the dataframe
+    existing_features = [f for f in important_features if f in df.columns]
+    
+    # Create interactions between pairs of features
+    for i, feat1 in enumerate(existing_features):
+        for feat2 in existing_features[i+1:]:
+            # Skip if either column has all NaN values
+            if df[feat1].isna().all() or df[feat2].isna().all():
+                continue
+                
+            # Create ratio features (with handling for division by zero)
+            df[f'{feat1}_per_{feat2}'] = df[feat1] / df[feat2].replace(0, np.nan)
+            df[f'{feat2}_per_{feat1}'] = df[feat2] / df[feat1].replace(0, np.nan)
+            
+            # Create product feature
+            df[f'{feat1}_x_{feat2}'] = df[feat1] * df[feat2]
+    
+    return df
+
+def prepare_training_data(subjects_df, comps_df, properties_df):
+    """
+    Prepare training data for XGBoost model
+    """
+    print("Preparing training data...")
+    
+    # Get unique subject addresses (each represents one appraisal)
+    all_subject_addresses = subjects_df['std_full_address'].unique()
+    print(f"Total number of unique appraisals: {len(all_subject_addresses)}")
+    
+    # Split appraisals into train and validation sets
+    train_addresses, val_addresses = train_test_split(
+        all_subject_addresses, test_size=0.2, random_state=42
+    )
+    print(f"Training appraisals: {len(train_addresses)}, Validation appraisals: {len(val_addresses)}")
+    
+    # Filter dataframes based on the split
+    train_subjects = subjects_df[subjects_df['std_full_address'].isin(train_addresses)]
+    train_comps = comps_df[comps_df['subject_address'].isin(train_addresses)]
+    train_properties = properties_df[properties_df['subject_address'].isin(train_addresses)]
+    
+    val_subjects = subjects_df[subjects_df['std_full_address'].isin(val_addresses)]
+    val_comps = comps_df[comps_df['subject_address'].isin(val_addresses)]
+    val_properties = properties_df[properties_df['subject_address'].isin(val_addresses)]
+    
+    print(f"Training subjects: {len(train_subjects)}, comps: {len(train_comps)}, properties: {len(train_properties)}")
+    print(f"Validation subjects: {len(val_subjects)}, comps: {len(val_comps)}, properties: {len(val_properties)}")
+    
+    # Create positive examples (selected comps) and negative examples (non-selected properties)
+    # For each subject in the training set
+    train_X = []
+    train_y = []
+    
+    for subject_address in train_addresses:
+        # Get the subject property
+        subject = train_subjects[train_subjects['std_full_address'] == subject_address].iloc[0]
+        
+        # Get comps for this subject (positive examples)
+        subject_comps = train_comps[train_comps['subject_address'] == subject_address]
+        
+        # Get other properties for this subject (potential negative examples)
+        subject_properties = train_properties[train_properties['subject_address'] == subject_address]
+        
+        # Process positive examples (selected comps)
+        for _, comp in subject_comps.iterrows():
+            # Create feature vector by comparing subject and comp
+            features = create_comparison_features(subject, comp)
+            train_X.append(features)
+            train_y.append(1)  # 1 for selected comp
+        
+        # Process negative examples (non-selected properties)
+        # Use properties that aren't in the comps list
+        for _, prop in subject_properties.iterrows():
+            # Skip if this property is already a comp (based on std_full_address)
+            if any(comp['std_full_address'] == prop['std_full_address'] for _, comp in subject_comps.iterrows()):
+                continue
+                
+            # Create feature vector by comparing subject and property
+            features = create_comparison_features(subject, prop)
+            train_X.append(features)
+            train_y.append(0)  # 0 for non-selected property
+    
+    # Convert to dataframes
+    train_X_df = pd.DataFrame(train_X)
+    
+    # Create validation data in the same way
+    val_X = []
+    val_y = []
+    
+    for subject_address in val_addresses:
+        # Get the subject property
+        subject = val_subjects[val_subjects['std_full_address'] == subject_address].iloc[0]
+        
+        # Get comps for this subject (positive examples)
+        subject_comps = val_comps[val_comps['subject_address'] == subject_address]
+        
+        # Get other properties for this subject (potential negative examples)
+        subject_properties = val_properties[val_properties['subject_address'] == subject_address]
+        
+        # Process positive examples (selected comps)
+        for _, comp in subject_comps.iterrows():
+            # Create feature vector by comparing subject and comp
+            features = create_comparison_features(subject, comp)
+            val_X.append(features)
+            val_y.append(1)  # 1 for selected comp
+        
+        # Process negative examples (non-selected properties)
+        for _, prop in subject_properties.iterrows():
+            # Skip if this property is already a comp (based on std_full_address)
+            if any(comp['std_full_address'] == prop['std_full_address'] for _, comp in subject_comps.iterrows()):
+                continue
+                
+            # Create feature vector by comparing subject and property
+            features = create_comparison_features(subject, prop)
+            val_X.append(features)
+            val_y.append(0)  # 0 for non-selected property
+    
+    # Convert to dataframes
+    val_X_df = pd.DataFrame(val_X)
+    
+    # Create feature interactions
+    train_X_df = create_feature_interactions(train_X_df)
+    val_X_df = create_feature_interactions(val_X_df)
+    
+    # Normalize features
+    scaler, train_X_normalized = normalize_numerical_features(train_X_df)
+    _, val_X_normalized = normalize_numerical_features(val_X_df)
+    
+    return train_X_normalized, np.array(train_y), val_X_normalized, np.array(val_y), scaler
+
+def create_comparison_features(subject, comp_or_property):
+    """
+    Create features that compare a subject property to a comp or potential comp
+    """
+    features = {}
+    
+    # List of numerical features to compare
+    numerical_features = ['gla', 'room_count', 'bedrooms', 'full_baths', 'half_baths']
+    
+    # Add absolute differences for numerical features
+    for feature in numerical_features:
+        if feature in subject and feature in comp_or_property:
+            # Handle NaN values
+            subj_value = subject[feature] if not pd.isna(subject[feature]) else 0
+            comp_value = comp_or_property[feature] if not pd.isna(comp_or_property[feature]) else 0
+            
+            # Calculate absolute difference
+            features[f'{feature}_diff'] = abs(subj_value - comp_value)
+            
+            # Calculate percentage difference
+            if subj_value != 0:
+                features[f'{feature}_pct_diff'] = abs(subj_value - comp_value) / subj_value
+            else:
+                features[f'{feature}_pct_diff'] = np.nan
+    
+    # Add raw values from comp/property
+    for feature in numerical_features:
+        if feature in comp_or_property:
+            features[feature] = comp_or_property[feature] if not pd.isna(comp_or_property[feature]) else 0
+    
+    return features
+
+def train_xgboost_model(train_X, train_y, val_X, val_y):
+    """
+    Train XGBoost model and evaluate on validation data
+    """
+    print("Training XGBoost model...")
+    
+    # Define XGBoost parameters
+    params = {
+        'objective': 'binary:logistic',
+        'eval_metric': 'logloss',
+        'eta': 0.1,
+        'max_depth': 6,
+        'min_child_weight': 1,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'scale_pos_weight': 10,  # Adjust based on your actual class ratio
+        'random_state': 42
+    }
+    
+    # Create DMatrix for XGBoost
+    dtrain = xgb.DMatrix(train_X, label=train_y)
+    dval = xgb.DMatrix(val_X, label=val_y)
+    
+    # Train model with early stopping
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=1000,
+        evals=[(dtrain, 'train'), (dval, 'val')],
+        early_stopping_rounds=50,
+        verbose_eval=100
+    )
+    
+    # Make predictions on validation set
+    val_preds_prob = model.predict(dval)
+    val_preds = (val_preds_prob > 0.2).astype(int)
+    
+    # Evaluate model
+    accuracy = accuracy_score(val_y, val_preds)
+    precision = precision_score(val_y, val_preds)
+    recall = recall_score(val_y, val_preds)
+    f1 = f1_score(val_y, val_preds)
+    
+    print(f"Validation Accuracy: {accuracy:.4f}")
+    print(f"Validation Precision: {precision:.4f}")
+    print(f"Validation Recall: {recall:.4f}")
+    print(f"Validation F1 Score: {f1:.4f}")
+    
+    return model, val_preds_prob
+
+def recommend_comps(model, scaler, subject, candidate_properties, top_n=3):
+    """
+    Recommend top N comparable properties for a given subject property
+    """
+    # Create comparison features for each candidate property
+    candidate_features = []
+    for _, prop in candidate_properties.iterrows():
+        features = create_comparison_features(subject, prop)
+        candidate_features.append(features)
+    
+    # Convert to dataframe
+    candidate_features_df = pd.DataFrame(candidate_features)
+    
+    # Create feature interactions
+    candidate_features_df = create_feature_interactions(candidate_features_df)
+    
+    # Normalize features using the same scaler used during training
+    candidate_features_normalized = candidate_features_df.copy()
+    numeric_cols = candidate_features_df.select_dtypes(include=['number']).columns.tolist()
+    candidate_features_normalized[numeric_cols] = scaler.transform(
+        candidate_features_df[numeric_cols].fillna(candidate_features_df[numeric_cols].median())
+    )
+    
+    # Create DMatrix
+    dcandidate = xgb.DMatrix(candidate_features_normalized)
+    
+    # Get predictions
+    candidate_scores = model.predict(dcandidate)
+    
+    # Add scores to candidate properties
+    candidate_properties_with_scores = candidate_properties.copy()
+    candidate_properties_with_scores['comp_score'] = candidate_scores
+    
+    # Sort by score and get top N
+    top_comps = candidate_properties_with_scores.sort_values('comp_score', ascending=False).head(top_n)
+    
+    return top_comps
+
+# Main execution
+def get_xgboost_model(subjects_df, comps_df, properties_df):
+    # Assume subjects_df, comps_df, properties_df are already loaded and processed
+    # For example:
+    # subjects_df, comps_df, properties_df = load_and_process_data("appraisals_dataset.json", "complete_field_mappings.csv")
+    
+    # Prepare training data
+    train_X, train_y, val_X, val_y, scaler = prepare_training_data(subjects_df, comps_df, properties_df)
+    
+    # Train XGBoost model
+    model, val_preds_prob = train_xgboost_model(train_X, train_y, val_X, val_y)
+    
+    # Save model and scaler for later use
+    model.save_model("./data/comp_recommendation_model.json")
+    
+    # Example of recommending comps for a new subject property
+    # (This would be used in the actual application)
+    # new_subject = subjects_df.iloc[0]  # Just an example
+    # candidate_properties = properties_df[properties_df['subject_address'] == new_subject['std_full_address']]
+    # recommended_comps = recommend_comps(model, scaler, new_subject, candidate_properties, top_n=3)
+    # print("Recommended comps:")
+    # print(recommended_comps[['std_full_address', 'comp_score']])
