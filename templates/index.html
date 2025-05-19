@@ -1,0 +1,45 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Property Comp Recommendation System</title>
+    </head>
+    <body>
+        <h1>Property Comp Recommendation System - Taha Abdullah</h1>
+        
+        <h2>Select a Subject Property</h2>
+        <form method="post">
+            <select name="subject_address">
+                {% for address in subject_addresses %}
+                <option value="{{ address }}">{{ address }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit">Get Recommendations</button>
+        </form>
+        
+        {% if subject %}
+        <h2>Subject Property</h2>
+        <div>
+            <p><strong>Address:</strong> {{ subject.std_full_address }}</p>
+            <p><strong>GLA:</strong> {{ subject.gla }} sq ft</p>
+            <p><strong>Bedrooms:</strong> {{ subject.bedrooms }}</p>
+        </div>
+        {% endif %}
+        
+        {% if recommendations %}
+        <h2>Recommended Comparable Properties</h2>
+        {% for rec in recommendations %}
+        <div>
+            <p><strong>Address:</strong> {{ rec.std_full_address }}</p>
+            <p><strong>Explanation:</strong></p>
+            <ul>
+            {% for reason in rec.explanation %}
+                <li>{{ reason }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </body>
+    </html>
+    

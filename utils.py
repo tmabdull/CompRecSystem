@@ -3,8 +3,9 @@ import re
 import pandas as pd
 import numpy as np
 import json
+import pickle
 
-def save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number:int=None, idx:bool=False):
+def save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number:int=None, idx:bool=False):
     '''Save processed data to CSV files for further analysis'''
     
     v_str, v_str_spaces = "", ""
@@ -17,6 +18,10 @@ def save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number:int=Non
     subjects_df.to_csv(f"{processed_path_prefix}subjects{v_str}.csv", index=idx)
     comps_df.to_csv(f"{processed_path_prefix}comps{v_str}.csv", index=idx)
     properties_df.to_csv(f"{processed_path_prefix}properties{v_str}.csv", index=idx)
+
+    subjects_df.to_pickle(f"{processed_path_prefix}subjects{v_str}.pkl")
+    comps_df.to_pickle(f"{processed_path_prefix}comps{v_str}.pkl")
+    properties_df.to_pickle(f"{processed_path_prefix}properties{v_str}.pkl")
 
     print(f"Processed data{v_str_spaces} saved to CSV files.")
 
@@ -603,7 +608,7 @@ def apply_specific_processing(subjects_df, comps_df, properties_df):
     if 'gla' in properties_df.columns:
         properties_df['gla'] = properties_df['gla'].apply(process_gla)
 
-    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=3, idx=True)
+    # save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number=3, idx=True)
 
     # Remove units from numeric fields
     numeric_fields_with_units = [
@@ -624,7 +629,7 @@ def apply_specific_processing(subjects_df, comps_df, properties_df):
             if field in df.columns:
                 df[field] = df[field].apply(remove_units_and_symbols)
 
-    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=4, idx=True)
+    # save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number=4, idx=True)
     
     return subjects_df, comps_df, properties_df
 
@@ -776,6 +781,58 @@ def convert_column_types(df, mapping_df, section_name):
     
     return df
 
+# Deduplication
+def merge_duplicates_keep_most_complete(df, subset_cols):
+    """
+    Merge duplicate rows in a DataFrame based on subset_cols, keeping the row with the most non-null values.
+    Logs the number of entries before and after merging.
+    """
+    print(f"Number of entries before merging duplicates: {len(df)}")
+    
+    # Create a completeness score (count of non-null values per row)
+    df['completeness'] = df.notnull().sum(axis=1)
+    
+    # Sort by completeness descending so that the most complete rows come first
+    df_sorted = df.sort_values(by='completeness', ascending=False)
+    
+    # Drop duplicates keeping the first (most complete) row
+    df_deduped = df_sorted.drop_duplicates(subset=subset_cols, keep='first')
+    
+    # Drop the completeness column
+    df_deduped = df_deduped.drop(columns=['completeness'])
+    
+    print(f"Number of entries after merging duplicates: {len(df_deduped)}")
+    print(f"Removed {len(df) - len(df_deduped)} duplicate entries")
+    
+    return df_deduped
+
+def handle_duplicates(subjects_df, comps_df, properties_df):
+    '''
+    Handle duplicates in all three dataframes by keeping the most complete records.
+    '''
+    # Define deduplication keys for each dataframe using the std_ fields
+    subject_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
+    comps_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
+    properties_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
+
+    # Filter keys to only include columns that exist
+    subject_dedup_keys = [k for k in subject_dedup_keys if k in subjects_df.columns]
+    comps_dedup_keys = [k for k in comps_dedup_keys if k in comps_df.columns]
+    properties_dedup_keys = [k for k in properties_dedup_keys if k in properties_df.columns]
+
+    # Deduplicate each dataframe
+    print("\nDeduplicating Subject Properties:")
+    subjects_df = merge_duplicates_keep_most_complete(subjects_df, subject_dedup_keys)
+
+    print("\nDeduplicating Comp Properties:")
+    comps_df = merge_duplicates_keep_most_complete(comps_df, comps_dedup_keys)
+
+    print("\nDeduplicating Available Properties:")
+    properties_df = merge_duplicates_keep_most_complete(properties_df, properties_dedup_keys)
+
+    return subjects_df, comps_df, properties_df
+
+# Main Processing function
 def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", mapping_file_path="./data/mappings/complete_field_mappings.csv"):
     """
     Load JSON raw data and field mapping, then process the data
@@ -837,14 +894,14 @@ def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", m
     # comps_df.head()
     # properties_df.head()
 
-    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=1, idx=True)
+    # save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number=1, idx=True)
     
     # Clean the DataFrames (basic cleaning)
     subjects_df = clean_dataframe(subjects_df)
     comps_df = clean_dataframe(comps_df)
     properties_df = clean_dataframe(properties_df)
 
-    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=2, idx=True)
+    # save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number=2, idx=True)
     
     # Apply specific field processing
     subjects_df, comps_df, properties_df = apply_specific_processing(subjects_df, comps_df, properties_df)
@@ -856,60 +913,26 @@ def load_and_process_data(json_file_path="./data/raw/appraisals_dataset.json", m
     comps_df = convert_column_types(comps_df, mapping_df[mapping_df['section'] == 'comps'], 'comps')
     properties_df = convert_column_types(properties_df, mapping_df[mapping_df['section'] == 'properties'], 'properties')
 
-    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=5, idx=True)
+    # save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number=5, idx=True)
+
+    # Deduplicate    
+    print("\n=== SUMMARY BEFORE DEDUPLICATION ===")
+    print(f"Total subject properties: {len(subjects_df)}")
+    print(f"Total comp properties: {len(comps_df)}")
+    print(f"Total available properties: {len(properties_df)}")
+
+    subjects_df, comps_df, properties_df = handle_duplicates(subjects_df, comps_df, properties_df)
+
+    print("\n=== SUMMARY AFTER DEDUPLICATION ===")
+    print(f"Total subject properties: {len(subjects_df)}")
+    print(f"Total comp properties: {len(comps_df)}")
+    print(f"Total available properties: {len(properties_df)})")
+
+    # Final processed data
+    save_appraisal_dfs(subjects_df, comps_df, properties_df, version_number=None, idx=False)
     
     return subjects_df, comps_df, properties_df
 
-# Deduplication
-def merge_duplicates_keep_most_complete(df, subset_cols):
-    """
-    Merge duplicate rows in a DataFrame based on subset_cols, keeping the row with the most non-null values.
-    Logs the number of entries before and after merging.
-    """
-    print(f"Number of entries before merging duplicates: {len(df)}")
-    
-    # Create a completeness score (count of non-null values per row)
-    df['completeness'] = df.notnull().sum(axis=1)
-    
-    # Sort by completeness descending so that the most complete rows come first
-    df_sorted = df.sort_values(by='completeness', ascending=False)
-    
-    # Drop duplicates keeping the first (most complete) row
-    df_deduped = df_sorted.drop_duplicates(subset=subset_cols, keep='first')
-    
-    # Drop the completeness column
-    df_deduped = df_deduped.drop(columns=['completeness'])
-    
-    print(f"Number of entries after merging duplicates: {len(df_deduped)}")
-    print(f"Removed {len(df) - len(df_deduped)} duplicate entries")
-    
-    return df_deduped
-
-def handle_duplicates(subjects_df, comps_df, properties_df):
-    '''
-    Handle duplicates in all three dataframes by keeping the most complete records.
-    '''
-    # Define deduplication keys for each dataframe using the std_ fields
-    subject_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
-    comps_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
-    properties_dedup_keys = ['std_street_number', 'std_street_name', 'std_city', 'std_postal_code']
-
-    # Filter keys to only include columns that exist
-    subject_dedup_keys = [k for k in subject_dedup_keys if k in subjects_df.columns]
-    comps_dedup_keys = [k for k in comps_dedup_keys if k in comps_df.columns]
-    properties_dedup_keys = [k for k in properties_dedup_keys if k in properties_df.columns]
-
-    # Deduplicate each dataframe
-    print("\nDeduplicating Subject Properties:")
-    subjects_df = merge_duplicates_keep_most_complete(subjects_df, subject_dedup_keys)
-
-    print("\nDeduplicating Comp Properties:")
-    comps_df = merge_duplicates_keep_most_complete(comps_df, comps_dedup_keys)
-
-    print("\nDeduplicating Available Properties:")
-    properties_df = merge_duplicates_keep_most_complete(properties_df, properties_dedup_keys)
-
-    return subjects_df, comps_df, properties_df
 
 # XGBoost Model
 import pandas as pd
@@ -918,13 +941,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, accuracy_score, precision_score, recall_score, f1_score
-
-address_components = set([
-    'std_unit_number', 'std_street_number', 'std_street_name', 
-    'std_city', 'std_province', 'std_postal_code'
-])
-
-MODEL_EXCLUSION_LIST = EXCLUDED_FEATURES_PREPROCESS.union(address_components) # Adding standardized address components to exclusion list
 
 def normalize_numerical_features(df):
     """
@@ -1095,6 +1111,11 @@ def create_comparison_features(subject, comp_or_property):
     numerical_features = []
     for key in set(list(subject.keys()) + list(comp_or_property.keys())):
         # Skip excluded features
+        address_components = set([
+            'std_unit_number', 'std_street_number', 'std_street_name', 
+            'std_city', 'std_province', 'std_postal_code'
+        ])
+        MODEL_EXCLUSION_LIST = EXCLUDED_FEATURES_PREPROCESS.union(address_components) # Adding standardized address components to exclusion list
         if key in MODEL_EXCLUSION_LIST:
             continue
             
@@ -1246,7 +1267,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 def recommend_comps(model, scaler, subject, candidate_properties, top_n=3, max_distance_km=5.0):
     """
-    Recommend top N comparable properties for a given subject property
+    Recommend top N comparable properties with SHAP explanations for a given subject property
     
     Args:
         model: Trained XGBoost model
@@ -1257,7 +1278,7 @@ def recommend_comps(model, scaler, subject, candidate_properties, top_n=3, max_d
         max_distance_km: Maximum distance in kilometers to consider (default: 5.0)
     
     Returns:
-        DataFrame with top N recommended properties
+        DataFrame with top N recommended properties and explanations
     """
     # Filter by distance if distance information is available
     filtered_candidates = candidate_properties.copy()
@@ -1437,13 +1458,75 @@ def evaluate_recommendations(model, scaler, val_subjects, val_comps, val_propert
             'overall_recall': 0
         }
 
-# Main execution
-def train_and_evaluate_xgboost():
-    # Load and process data
-    subjects_df, comps_df, properties_df = load_and_process_data()
+import os
+def load_latest_model_and_scaler():
+    """
+    Load the most recent model and scaler based on timestamp in filename
+    """
+    models_dir = "./data/models/"
+    
+    # Get all model files
+    model_files = [f for f in os.listdir(models_dir) if f.endswith('.json')]
+    
+    if not model_files:
+        raise FileNotFoundError("No model files found in ./data/models/")
+    
+    # Sort by timestamp (assuming filename format includes timestamp)
+    # The format is comp_recommendation_model_YYYYMMDD_HHMMSS_accuracy_precision_recall_f1.json
+    latest_model_file = sorted(model_files)[-1]
+    
+    # Extract base filename without extension
+    base_filename = latest_model_file.replace('.json', '')
+    
+    # Construct paths
+    model_path = os.path.join(models_dir, latest_model_file)
+    scaler_path = os.path.join(models_dir, f"{base_filename}_scaler.pkl")
+    feature_names_path = os.path.join(models_dir, f"{base_filename}_features.pkl")
+    
+    # Check if scaler and feature names files exist
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"Scaler file not found: {scaler_path}")
+    
+    if not os.path.exists(feature_names_path):
+        raise FileNotFoundError(f"Feature names file not found: {feature_names_path}")
+    
+    # Load model
+    model = xgb.Booster()
+    model.load_model(model_path)
+    
+    # Load scaler
+    with open(scaler_path, 'rb') as f:
+        scaler = pickle.load(f)
+    
+    # Load feature names
+    with open(feature_names_path, 'rb') as f:
+        feature_names = pickle.load(f)
+    
+    # Add feature names to model
+    model.feature_names = feature_names
+    
+    print(f"Loaded model and scaler from {model_path}")
+    return model, scaler
 
-    # Final processed data
-    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=None, idx=False)
+# Main execution
+def train_and_evaluate_xgboost(force_reprocessing=False):
+    # Load and process data
+    if (os.path.exists("./data/processed/processed_subjects.pkl") and 
+        os.path.exists("./data/processed/processed_comps.pkl") and 
+        os.path.exists("./data/processed/processed_properties.pkl") and 
+        force_reprocessing == False):
+        # Load directly from pkl
+        print("Appraisal df pkl files found! Loading...")
+        subjects_df = pd.read_pickle("./data/processed/processed_subjects.pkl")
+        comps_df = pd.read_pickle("./data/processed/processed_comps.pkl")
+        properties_df = pd.read_pickle("./data/processed/processed_properties.pkl")
+    else:
+        # Create dfs by processing the raw data
+        if not force_reprocessing:
+            print("Could not find appraisal df pkl files.")
+        print("Creating dfs by processing the raw data...")
+        subjects_df, comps_df, properties_df = load_and_process_data()
+    print("Appraisal dfs loaded successfully")
     
     # Prepare training data
     train_X, train_y, val_X, val_y, scaler = prepare_training_data(subjects_df, comps_df, properties_df)
@@ -1451,10 +1534,24 @@ def train_and_evaluate_xgboost():
     # Train XGBoost model
     model, val_preds_prob, accuracy, precision, recall, f1 = train_xgboost_model(train_X, train_y, val_X, val_y)
 
-    # Save model and scaler for later use
+    # Save model, scaler, and feature_names for later use
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    model.save_model(f"./data/models/comp_recommendation_model_{timestamp}_{accuracy:.2f}_{precision:.2f}_{recall:.2f}_{f1:.2f}.json")
+    base_filename = f"comp_recommendation_model_{timestamp}_{accuracy:.2f}_{precision:.2f}_{recall:.2f}_{f1:.2f}"
+        
+    model_path = f"./data/models/{base_filename}.json"
+    model.save_model(model_path)
 
+    scaler_path = f"./data/models/{base_filename}_scaler.pkl"
+    with open(scaler_path, 'wb') as f:
+        pickle.dump(scaler, f)
+
+    # Save feature names separately for easy access across sessions
+    feature_names_path = f"./data/models/{base_filename}_features.pkl"
+    with open(feature_names_path, 'wb') as f:
+        pickle.dump(model.feature_names, f)
+
+    print(f"Model, scaler, and feature_names saved with timestamp {timestamp}")
+        
     # Get validation subjects, comps, and properties
     all_subject_addresses = subjects_df['std_full_address'].unique()
     train_addresses, val_addresses = train_test_split(
