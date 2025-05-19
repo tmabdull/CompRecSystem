@@ -1,10 +1,13 @@
 # app.py
 import os
+import uvicorn
+import pandas as pd
 from fastapi import FastAPI, Request, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
-import uvicorn
-from utils import *
+
+from data_processing import load_and_process_data
+from rec_system import load_latest_model_and_scaler, recommend_comps
 
 # Initialize FastAPI app
 app = FastAPI(title="Property Comp Recommendation System")
