@@ -1065,30 +1065,6 @@ def prepare_features_for_knn(subjects_df, properties_df, selected_features=None,
     
     return subjects_features, properties_features, preprocessor, feature_names, selected_features
 
-def calculate_distance(lat1, lon1, lat2, lon2):
-    """
-    Calculate the great circle distance between two points 
-    on the earth (specified in decimal degrees)
-    using the Haversine formula.
-    
-    Returns distance in kilometers.
-    """
-    # Convert decimal degrees to radians
-    lat1, lon1, lat2, lon2 = map(float, [lat1, lon1, lat2, lon2])
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    
-    # Haversine formula
-    dlon = lon2 - lon1
-    dlat = lat2 - lat1
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    radius = 6371  # Radius of earth in kilometers
-    
-    # Calculate the distance
-    distance = radius * c
-    
-    return distance
-
 def is_selected_comp(subject_row, candidate_row, comps_df):
     """
     Determine if a candidate property was selected as a comp for a subject property.
@@ -1469,15 +1445,29 @@ def create_comparison_features(subject, comp_or_property):
     """
     features = {}
     
-    # List of numerical features to compare
-    numerical_features = ['gla', 'room_count', 'bedrooms', 'full_baths', 'half_baths']
+    # Get all numerical features from both objects
+    numerical_features = []
+    for key in set(list(subject.keys()) + list(comp_or_property.keys())):
+        # Skip excluded features
+        if key in MODEL_EXCLUSION_LIST:
+            continue
+            
+        # Check if the feature exists in both and is numeric
+        if key in subject and key in comp_or_property:
+            # Try to convert to numeric to check if it's a numerical feature
+            try:
+                float(subject[key]) if not pd.isna(subject[key]) else 0
+                float(comp_or_property[key]) if not pd.isna(comp_or_property[key]) else 0
+                numerical_features.append(key)
+            except (ValueError, TypeError):
+                pass
     
     # Add absolute differences for numerical features
     for feature in numerical_features:
         if feature in subject and feature in comp_or_property:
             # Handle NaN values
-            subj_value = subject[feature] if not pd.isna(subject[feature]) else 0
-            comp_value = comp_or_property[feature] if not pd.isna(comp_or_property[feature]) else 0
+            subj_value = float(subject[feature]) if not pd.isna(subject[feature]) else 0
+            comp_value = float(comp_or_property[feature]) if not pd.isna(comp_or_property[feature]) else 0
             
             # Calculate absolute difference
             features[f'{feature}_diff'] = abs(subj_value - comp_value)
@@ -1491,7 +1481,7 @@ def create_comparison_features(subject, comp_or_property):
     # Add raw values from comp/property
     for feature in numerical_features:
         if feature in comp_or_property:
-            features[feature] = comp_or_property[feature] if not pd.isna(comp_or_property[feature]) else 0
+            features[feature] = float(comp_or_property[feature]) if not pd.isna(comp_or_property[feature]) else 0
     
     return features
 
@@ -1510,13 +1500,16 @@ def train_xgboost_model(train_X, train_y, val_X, val_y):
         'min_child_weight': 1,
         'subsample': 0.8,
         'colsample_bytree': 0.8,
-        'scale_pos_weight': 10,  # Adjust based on your actual class ratio
+        'scale_pos_weight': 30,  # Adjust based on your actual class ratio
         'random_state': 42
     }
     
-    # Create DMatrix for XGBoost
-    dtrain = xgb.DMatrix(train_X, label=train_y)
-    dval = xgb.DMatrix(val_X, label=val_y)
+    # Store feature names
+    feature_names = list(train_X.columns)
+
+    # Create DMatrix for XGBoost with explicit feature names
+    dtrain = xgb.DMatrix(train_X, label=train_y, feature_names=feature_names)
+    dval = xgb.DMatrix(val_X, label=val_y, feature_names=feature_names)
     
     # Train model with early stopping
     model = xgb.train(
@@ -1527,14 +1520,17 @@ def train_xgboost_model(train_X, train_y, val_X, val_y):
         early_stopping_rounds=50,
         verbose_eval=100
     )
+
+    # Store feature names in the model for later use
+    model.feature_names = feature_names
     
     # Make predictions on validation set
     val_preds_prob = model.predict(dval)
-    val_preds = (val_preds_prob > 0.2).astype(int)
+    val_preds = (val_preds_prob > 0.01).astype(int)
     
     # Evaluate model
     accuracy = accuracy_score(val_y, val_preds)
-    precision = precision_score(val_y, val_preds)
+    precision = precision_score(val_y, val_preds, zero_division=0)
     recall = recall_score(val_y, val_preds)
     f1 = f1_score(val_y, val_preds)
     
@@ -1543,15 +1539,55 @@ def train_xgboost_model(train_X, train_y, val_X, val_y):
     print(f"Validation Recall: {recall:.4f}")
     print(f"Validation F1 Score: {f1:.4f}")
     
-    return model, val_preds_prob
+    return model, val_preds_prob, accuracy, precision, recall, f1
 
-def recommend_comps(model, scaler, subject, candidate_properties, top_n=3):
+def recommend_comps(model, scaler, subject, candidate_properties, top_n=3, max_distance_km=5.0):
     """
     Recommend top N comparable properties for a given subject property
+    
+    Args:
+        model: Trained XGBoost model
+        scaler: Feature scaler used during training
+        subject: Subject property (Series or dict)
+        candidate_properties: DataFrame of candidate properties
+        top_n: Number of recommendations to return (default: 3)
+        max_distance_km: Maximum distance in kilometers to consider (default: 5.0)
+    
+    Returns:
+        DataFrame with top N recommended properties
     """
+    # Filter by distance if distance information is available
+    filtered_candidates = candidate_properties.copy()
+    
+    # If we have latitude/longitude coordinates
+    if all(col in filtered_candidates.columns for col in ['latitude', 'longitude']) and \
+       all(col in subject for col in ['latitude', 'longitude']):
+        # Calculate distance using Haversine formula
+        filtered_candidates['distance_km'] = filtered_candidates.apply(
+            lambda row: calculate_distance(
+                subject['latitude'], subject['longitude'],
+                row['latitude'], row['longitude']
+            ),
+            axis=1
+        )
+        # Filter by calculated distance
+        filtered_candidates = filtered_candidates[filtered_candidates['distance_km'] <= max_distance_km]
+    
+    # If we have distance_to_subject field in the candidates
+    elif 'distance_to_subject' in filtered_candidates.columns:
+        # Ensure distance is in km and is numeric
+        filtered_candidates = filtered_candidates[
+            pd.to_numeric(filtered_candidates['distance_to_subject'], errors='coerce') <= max_distance_km
+        ]
+    
+    # If no candidates remain after distance filtering, return empty DataFrame
+    if len(filtered_candidates) == 0:
+        print(f"Warning: No candidates within {max_distance_km} km of subject property")
+        return pd.DataFrame()
+    
     # Create comparison features for each candidate property
     candidate_features = []
-    for _, prop in candidate_properties.iterrows():
+    for _, prop in filtered_candidates.iterrows():
         features = create_comparison_features(subject, prop)
         candidate_features.append(features)
     
@@ -1560,13 +1596,28 @@ def recommend_comps(model, scaler, subject, candidate_properties, top_n=3):
     
     # Create feature interactions
     candidate_features_df = create_feature_interactions(candidate_features_df)
+
+    # Get the feature names used during training, in the same order
+    train_features = model.feature_names
+
+    # Ensure all training features exist in candidate features
+    for feature in train_features:
+        if feature not in candidate_features_df.columns:
+            candidate_features_df[feature] = 0  # Add missing features with default values
+    
+    # Select only the features used in training and in the same order
+    candidate_features_df = candidate_features_df[train_features]
     
     # Normalize features using the same scaler used during training
     candidate_features_normalized = candidate_features_df.copy()
-    numeric_cols = candidate_features_df.select_dtypes(include=['number']).columns.tolist()
-    candidate_features_normalized[numeric_cols] = scaler.transform(
-        candidate_features_df[numeric_cols].fillna(candidate_features_df[numeric_cols].median())
-    )
+    
+    # Apply scaling if there are numeric columns
+    if hasattr(scaler, 'feature_names_in_'):
+        numeric_cols = candidate_features_df.columns
+        candidate_features_normalized = pd.DataFrame(
+            scaler.transform(candidate_features_df.fillna(candidate_features_df.median())),
+            columns=numeric_cols
+        )
     
     # Create DMatrix
     dcandidate = xgb.DMatrix(candidate_features_normalized)
@@ -1575,33 +1626,180 @@ def recommend_comps(model, scaler, subject, candidate_properties, top_n=3):
     candidate_scores = model.predict(dcandidate)
     
     # Add scores to candidate properties
-    candidate_properties_with_scores = candidate_properties.copy()
-    candidate_properties_with_scores['comp_score'] = candidate_scores
+    filtered_candidates['comp_score'] = candidate_scores
     
     # Sort by score and get top N
-    top_comps = candidate_properties_with_scores.sort_values('comp_score', ascending=False).head(top_n)
+    top_comps = filtered_candidates.sort_values('comp_score', ascending=False).head(top_n)
     
     return top_comps
 
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculate distance between two points using Haversine formula
+    Returns distance in kilometers
+    """
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    r = 6371  # Radius of earth in kilometers
+    return c * r
+
+def evaluate_recommendations(model, scaler, val_subjects, val_comps, val_properties):
+    """
+    Evaluate the recommendation system on validation data
+    
+    Args:
+        model: Trained XGBoost model
+        scaler: Feature scaler used during training
+        val_subjects: DataFrame of validation subject properties
+        val_comps: DataFrame of validation comp properties
+        val_properties: DataFrame of validation candidate properties
+    
+    Returns:
+        Dictionary of evaluation metrics
+    """
+    print("Evaluating recommendation system...")
+    
+    # Initialize metrics
+    total_subjects = 0
+    total_recommendations = 0
+    total_hits = 0
+    precision_at_3_sum = 0
+    
+    # Process each subject property
+    for _, subject in val_subjects.iterrows():
+        subject_address = subject['std_full_address']
+        
+        # Get actual comps for this subject
+        actual_comps = val_comps[val_comps['subject_address'] == subject_address]
+        
+        # Skip if no actual comps
+        if len(actual_comps) == 0:
+            continue
+            
+        # Get candidate properties for this subject
+        candidates = val_properties[val_properties['subject_address'] == subject_address]
+        
+        # Skip if no candidates
+        if len(candidates) == 0:
+            continue
+            
+        # Get recommended comps
+        recommended_comps = recommend_comps(model, scaler, subject, candidates, top_n=3)
+        
+        # Skip if no recommendations
+        if len(recommended_comps) == 0:
+            continue
+            
+        # Count hits (recommended comps that match actual comps)
+        hits = 0
+        for _, rec_comp in recommended_comps.iterrows():
+            # Check if this recommendation matches any actual comp
+            for _, act_comp in actual_comps.iterrows():
+                # Match based on standardized full address
+                if ('std_full_address' in rec_comp and 'std_full_address' in act_comp and 
+                    rec_comp['std_full_address'] == act_comp['std_full_address']):
+                    hits += 1
+                    break
+                # Fallback to regular address if standardized not available
+                elif 'id' in rec_comp and 'id' in act_comp and rec_comp['id'] == act_comp['id']:
+                    hits += 1
+                    break
+        
+        # Update metrics
+        total_subjects += 1
+        total_recommendations += len(recommended_comps)
+        total_hits += hits
+        precision_at_3 = hits / min(3, len(recommended_comps))
+        precision_at_3_sum += precision_at_3
+    
+    # Calculate aggregate metrics
+    if total_subjects > 0:
+        avg_precision_at_3 = precision_at_3_sum / total_subjects
+        overall_precision = total_hits / total_recommendations if total_recommendations > 0 else 0
+        recall = total_hits / (total_subjects * 3) if total_subjects > 0 else 0
+        
+        print(f"Evaluated on {total_subjects} subject properties")
+        print(f"Average Precision@3: {avg_precision_at_3:.4f}")
+        print(f"Overall Precision: {overall_precision:.4f}")
+        print(f"Overall Recall: {recall:.4f}")
+        
+        return {
+            'num_subjects': total_subjects,
+            'avg_precision_at_3': avg_precision_at_3,
+            'overall_precision': overall_precision,
+            'overall_recall': recall
+        }
+    else:
+        print("No valid subjects for evaluation")
+        return {
+            'num_subjects': 0,
+            'avg_precision_at_3': 0,
+            'overall_precision': 0,
+            'overall_recall': 0
+        }
+
 # Main execution
-def get_xgboost_model(subjects_df, comps_df, properties_df):
-    # Assume subjects_df, comps_df, properties_df are already loaded and processed
-    # For example:
-    # subjects_df, comps_df, properties_df = load_and_process_data("appraisals_dataset.json", "complete_field_mappings.csv")
+import datetime
+def train_and_evaluate_xgboost():
+    # Load and process data
+    subjects_df, comps_df, properties_df = load_and_process_data()
+
+    # Final processed data
+    save_dfs_to_csv(subjects_df, comps_df, properties_df, version_number=None, idx=False)
     
     # Prepare training data
     train_X, train_y, val_X, val_y, scaler = prepare_training_data(subjects_df, comps_df, properties_df)
-    
+
     # Train XGBoost model
-    model, val_preds_prob = train_xgboost_model(train_X, train_y, val_X, val_y)
-    
+    model, val_preds_prob, accuracy, precision, recall, f1 = train_xgboost_model(train_X, train_y, val_X, val_y)
+
     # Save model and scaler for later use
-    model.save_model("./data/comp_recommendation_model.json")
-    
-    # Example of recommending comps for a new subject property
-    # (This would be used in the actual application)
-    # new_subject = subjects_df.iloc[0]  # Just an example
-    # candidate_properties = properties_df[properties_df['subject_address'] == new_subject['std_full_address']]
-    # recommended_comps = recommend_comps(model, scaler, new_subject, candidate_properties, top_n=3)
-    # print("Recommended comps:")
-    # print(recommended_comps[['std_full_address', 'comp_score']])
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    model.save_model(f"./data/models/comp_recommendation_model_{timestamp}_{accuracy:.2f}_{precision:.2f}_{recall:.2f}_{f1:.2f}.json")
+
+    # Get validation subjects, comps, and properties
+    all_subject_addresses = subjects_df['std_full_address'].unique()
+    train_addresses, val_addresses = train_test_split(
+        all_subject_addresses, test_size=0.2, random_state=42
+    )
+
+    val_subjects = subjects_df[subjects_df['std_full_address'].isin(val_addresses)]
+    val_comps = comps_df[comps_df['subject_address'].isin(val_addresses)]
+    val_properties = properties_df[properties_df['subject_address'].isin(val_addresses)]
+
+    # Evaluate recommendations on validation set
+    evaluation_metrics = evaluate_recommendations(model, scaler, val_subjects, val_comps, val_properties)
+    print(evaluation_metrics)
+
+    # Example of recommending comps for a specific subject property
+    if len(val_subjects) > 0:
+        example_subject = val_subjects.iloc[0]
+        example_candidates = val_properties[val_properties['subject_address'] == example_subject['std_full_address']]
+        
+        print("\nExample Recommendations:")
+        print(f"Subject Property: {example_subject['std_full_address']}")
+        
+        recommended_comps = recommend_comps(model, scaler, example_subject, example_candidates, top_n=3)
+        
+        if len(recommended_comps) > 0:
+            print("\nRecommended comps:")
+            display_cols = ['std_full_address', 'comp_score']
+            display_cols = [col for col in display_cols if col in recommended_comps.columns]
+            print(recommended_comps[display_cols])
+            
+            # Show actual comps for comparison
+            actual_comps = val_comps[val_comps['subject_address'] == example_subject['std_full_address']]
+            if len(actual_comps) > 0:
+                print("\nActual comps selected by appraiser:")
+                display_cols = [col for col in display_cols if col in actual_comps.columns]
+                print(actual_comps[display_cols])
+
+# If running as a script
+if __name__ == "__main__":
+    train_and_evaluate_xgboost()
