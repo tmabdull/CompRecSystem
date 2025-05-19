@@ -62,10 +62,10 @@ along with explanations for why they were selected.
 
 ## Future Steps / Improvements
 - Modifying the data processing pipeline to parse and include more features 
-from the raw data.
-- Tuning the XGBoost model for increased performance.
+from the raw data
+- Tuning the XGBoost model for increased performance
 - Feedback/recommendation system where the user can mark whether a recommendation 
-is good or bad. The model will then be retrained based on this feedback.
+is good or bad (the model will then be retrained based on this feedback)
 - Prettier frontend
 - Getting off localhost :D
 
