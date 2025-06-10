@@ -34,58 +34,6 @@ def standardize_postal_code(postal_code):
         return f"{postal_code[:3]} {postal_code[3:]}"
     return postal_code
 
-def extract_complex_address_components(address_str):
-    """
-    Extract components from complex address formats including various unit formats.
-    Returns unit_number, street_number, street_name
-    """
-    if not address_str:
-        return None, None, None
-        
-    # Clean the address string
-    address_str = address_str.strip()
-    
-    # Handle "Unit X - Y" format
-    unit_pattern = re.compile(r'^(?:Unit|UNIT|Apt\.?|APT\.?|#)\s*([A-Za-z0-9-]+)\s*[-:]\s*(\d+.*)$')
-    unit_match = unit_pattern.match(address_str)
-    
-    if unit_match:
-        unit_number = unit_match.group(1)
-        remaining = unit_match.group(2)
-        
-        # Extract street number and name from remaining part
-        components = remaining.split(maxsplit=1)
-        if len(components) >= 2:
-            street_number = components[0]
-            street_name = components[1]
-        else:
-            street_number = remaining
-            street_name = ""
-            
-        return unit_number, street_number, street_name
-    
-    # Handle "X-Y Street" format (like 210-40 Regency Park Dr)
-    complex_pattern = re.compile(r'^(\d+)[-:](\d+)\s+(.+)$')
-    complex_match = complex_pattern.match(address_str)
-    
-    if complex_match:
-        unit_number = complex_match.group(1)
-        street_number = complex_match.group(2)
-        street_name = complex_match.group(3)
-        return unit_number, street_number, street_name
-    
-    # Handle standard "X Street" format
-    standard_pattern = re.compile(r'^(\d+(?:\s+[A-Za-z0-9]+)?)\s+(.+)$')
-    standard_match = standard_pattern.match(address_str)
-    
-    if standard_match:
-        street_number = standard_match.group(1)
-        street_name = standard_match.group(2)
-        return None, street_number, street_name
-    
-    # If no patterns match, return the whole string as street_name
-    return None, None, address_str
-
 def standardize_street_type(street_name):
     """Standardize common street type abbreviations"""
     street_type_map = {
@@ -446,22 +394,7 @@ def process_bedroom_count(value):
     if isinstance(value, (int, float)):
         return int(value)
     if isinstance(value, str):
-        # Handle format like "2+1"
-        if '+' in value:
-            parts = value.split('+')
-            total = 0
-            for part in parts:
-                try:
-                    total += int(part.strip())
-                except ValueError:
-                    pass
-            return total
-        # Try to convert directly to integer
-        try:
-            return int(value.strip())
-        except ValueError:
-            return np.nan
-    return np.nan
+        return int(value)
 
 def process_bathroom_count(value):
     """
@@ -470,35 +403,6 @@ def process_bathroom_count(value):
     """
     if pd.isnull(value):
         return (np.nan, np.nan)
-    
-    if isinstance(value, str):
-        # Handle format "2:1" (2 full, 1 half)
-        if ':' in value:
-            parts = value.split(':')
-            try:
-                full_baths = int(parts[0].strip())
-                half_baths = int(parts[1].strip()) if len(parts) > 1 else 0
-                return (full_baths, half_baths)
-            except ValueError:
-                pass
-        
-        # Handle format "2F1P" or "2F 1P" or "2F 1H" (2 full, 1 half)
-        match = re.search(r'(\d+)\s*[Ff].*?(\d+)\s*[PpHh]', value)
-        if match:
-            try:
-                full_baths = int(match.group(1))
-                half_baths = int(match.group(2))
-                return (full_baths, half_baths)
-            except ValueError:
-                pass
-        
-        # Try to extract just a single number (assume full baths)
-        match = re.search(r'(\d+)', value)
-        if match:
-            try:
-                return (int(match.group(1)), 0)
-            except ValueError:
-                pass
     
     return (np.nan, np.nan)
 
