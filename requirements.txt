@@ -2,8 +2,9 @@ fastapi
 uvicorn
 numpy
 pandas
-scikit-learn
-xgboost
-shap
+# scikit-learn
+# xgboost
+# shap
 python-multipart
 jinja2
+pytest
